@@ -1,6 +1,10 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
+    <!-- Firebase App (Compat) SDK -->
+    <script src="https://www.gstatic.com/firebasejs/10.8.0/firebase-app-compat.js"></script>
+    <!-- Firebase Firestore (Compat) SDK -->
+    <script src="https://www.gstatic.com/firebasejs/10.8.0/firebase-firestore-compat.js"></script>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Sharma EduAcademy - Tuition Management System</title>
@@ -928,6 +932,39 @@
 
     <!-- APP JAVASCRIPT LOGIC -->
     <script>
+         // ---------- STORAGE BRIDGE TO FIREBASE FIRESTORE ----------
+        const CloudDB = {
+            async getItem(key) {
+                try {
+                    const doc = await db.collection('sharma_edu_db').doc(key).get();
+                    if (doc.exists) {
+                        return JSON.stringify(doc.data().value);
+                    }
+                } catch (e) { console.error("Cloud read error", e); }
+                return localStorage.getItem(key);
+            },
+            async setItem(key, value) {
+                localStorage.setItem(key, value); // Keep local backup
+                try {
+                    const parsed = JSON.parse(value);
+                    await db.collection('sharma_edu_db').doc(key).set({ value: parsed });
+                } catch (e) { console.error("Cloud write error", e); }
+            }
+        };
+        
+        // ---------- FIREBASE CONFIGURATION ----------
+        const firebaseConfig = {
+            apiKey: "AIzaSyDPWCSP5Mst4fT3AFYm8yFRZN1mQhWkkoQ",
+            authDomain: "sharma-eduacademy.firebaseapp.com",
+            projectId: "sharma-eduacademy",
+            storageBucket: "sharma-eduacademy.firebasestorage.app",
+            messagingSenderId: "254830849030",
+            appId: "1:254830849030:web:e17f8558e0b7cae145e787",
+            measurementId: "G-GSMKDJ966P"
+        };
+        // Initialize Firebase
+        firebase.initializeApp(firebaseConfig);
+        const db = firebase.firestore();
         // ---------- EMAIL (EmailJS) CONFIGURATION ----------
         // Fill these 3 values from your EmailJS dashboard (see setup steps). Until then PIN recovery by email stays disabled.
         const EMAILJS_CONFIG = {
@@ -1000,26 +1037,25 @@
                 this.initData();
                 this.setupEventListeners();
                 this.refreshTeacherPinHint();
-            }
-
-            initData() {
-                                if (!localStorage.getItem(DB_KEYS.UPI_CONFIG)) {
-                    localStorage.setItem(DB_KEYS.UPI_CONFIG, JSON.stringify({ upiId: 'sharmaedu@upi', payeeName: 'Sharma Eduacademy' }));
+                       }
+async initData() {
+                if (!localStorage.getItem(DB_KEYS.UPI_CONFIG)) {
+                    await CloudDB.setItem(DB_KEYS.UPI_CONFIG, JSON.stringify({ upiId: 'sharmaedu@upi', payeeName: 'Sharma Eduacademy' }));
                 }
-                if (!localStorage.getItem(DB_KEYS.STUDENTS)) localStorage.setItem(DB_KEYS.STUDENTS, JSON.stringify(defaultStudents));
-                if (!localStorage.getItem(DB_KEYS.ATTENDANCE)) localStorage.setItem(DB_KEYS.ATTENDANCE, JSON.stringify({}));
-                if (!localStorage.getItem(DB_KEYS.HOMEWORK)) localStorage.setItem(DB_KEYS.HOMEWORK, JSON.stringify([]));
-                if (!localStorage.getItem(DB_KEYS.NOTICES)) localStorage.setItem(DB_KEYS.NOTICES, JSON.stringify(defaultNotices));
-                if (!localStorage.getItem(DB_KEYS.PROOFS)) localStorage.setItem(DB_KEYS.PROOFS, JSON.stringify([]));
-                if (!localStorage.getItem(DB_KEYS.MESSAGES)) localStorage.setItem(DB_KEYS.MESSAGES, JSON.stringify([]));
-                if (!localStorage.getItem(DB_KEYS.DOUBTS)) localStorage.setItem(DB_KEYS.DOUBTS, JSON.stringify([]));
-                if (!localStorage.getItem(DB_KEYS.LEFT_STUDENTS)) localStorage.setItem(DB_KEYS.LEFT_STUDENTS, JSON.stringify([]));
-                if (!localStorage.getItem(DB_KEYS.MANUAL_RECEIPTS)) localStorage.setItem(DB_KEYS.MANUAL_RECEIPTS, JSON.stringify([]));
-                if (!localStorage.getItem(DB_KEYS.LEDGER)) localStorage.setItem(DB_KEYS.LEDGER, JSON.stringify({}));
+                if (!localStorage.getItem(DB_KEYS.STUDENTS)) await CloudDB.setItem(DB_KEYS.STUDENTS, JSON.stringify(defaultStudents));
+                if (!localStorage.getItem(DB_KEYS.ATTENDANCE)) await CloudDB.setItem(DB_KEYS.ATTENDANCE, JSON.stringify({}));
+                if (!localStorage.getItem(DB_KEYS.HOMEWORK)) await CloudDB.setItem(DB_KEYS.HOMEWORK, JSON.stringify([]));
+                if (!localStorage.getItem(DB_KEYS.NOTICES)) await CloudDB.setItem(DB_KEYS.NOTICES, JSON.stringify(defaultNotices));
+                if (!localStorage.getItem(DB_KEYS.PROOFS)) await CloudDB.setItem(DB_KEYS.PROOFS, JSON.stringify([]));
+                if (!localStorage.getItem(DB_KEYS.MESSAGES)) await CloudDB.setItem(DB_KEYS.MESSAGES, JSON.stringify([]));
+                if (!localStorage.getItem(DB_KEYS.DOUBTS)) await CloudDB.setItem(DB_KEYS.DOUBTS, JSON.stringify([]));
+                if (!localStorage.getItem(DB_KEYS.LEFT_STUDENTS)) await CloudDB.setItem(DB_KEYS.LEFT_STUDENTS, JSON.stringify([]));
+                if (!localStorage.getItem(DB_KEYS.MANUAL_RECEIPTS)) await CloudDB.setItem(DB_KEYS.MANUAL_RECEIPTS, JSON.stringify([]));
+                if (!localStorage.getItem(DB_KEYS.LEDGER)) await CloudDB.setItem(DB_KEYS.LEDGER, JSON.stringify({}));
+                
                 this.migrateFees();
                 this.pinReady = this.migratePin();
 
-                // Set default attendance date to today
                 const today = new Date().toISOString().split('T')[0];
                 const dateInput = document.getElementById('attendanceDate');
                 if (dateInput) dateInput.value = today;
