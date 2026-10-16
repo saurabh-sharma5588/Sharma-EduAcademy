@@ -1,10 +1,6 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <!-- Firebase App (Compat) SDK -->
-    <script src="https://www.gstatic.com/firebasejs/10.8.0/firebase-app-compat.js"></script>
-    <!-- Firebase Firestore (Compat) SDK -->
-    <script src="https://www.gstatic.com/firebasejs/10.8.0/firebase-firestore-compat.js"></script>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Sharma EduAcademy - Tuition Management System</title>
@@ -14,6 +10,9 @@
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     <!-- QR Code Generator -->
     <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+    <!-- Firebase (cloud database) -->
+    <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore-compat.js"></script>
     <!-- EmailJS SDK -->
     <script type="text/javascript" src="https://cdn.jsdelivr.net/npm/@emailjs/browser@3/dist/email.min.js"></script>
     <script>
@@ -930,41 +929,354 @@
         </div>
     </div>
 
+    <!-- CLOUD CONNECTION OVERLAY + STATUS BANNER -->
+    <div id="cloudOverlay" style="position:fixed;inset:0;z-index:100;background:#f8fafc;display:flex;align-items:center;justify-content:center;padding:24px;text-align:center;font-family:Arial,sans-serif;">
+        <div style="max-width:380px;">
+            <div id="cloudOverlayText" style="color:#334155;font-size:15px;">Connecting to the cloud database...</div>
+            <button id="cloudRetryBtn" onclick="location.reload()" style="display:none;margin-top:16px;background:#059669;color:#fff;border:0;border-radius:12px;padding:10px 22px;font-size:14px;font-weight:600;cursor:pointer;">Retry</button>
+        </div>
+    </div>
+    <div id="cloudBanner" style="display:none;position:fixed;left:0;right:0;bottom:0;z-index:90;padding:8px 14px;font-family:Arial,sans-serif;font-size:12px;text-align:center;"></div>
+
     <!-- APP JAVASCRIPT LOGIC -->
     <script>
-         // ---------- STORAGE BRIDGE TO FIREBASE FIRESTORE ----------
-        const CloudDB = {
-            async getItem(key) {
-                try {
-                    const doc = await db.collection('sharma_edu_db').doc(key).get();
-                    if (doc.exists) {
-                        return JSON.stringify(doc.data().value);
-                    }
-                } catch (e) { console.error("Cloud read error", e); }
-                return localStorage.getItem(key);
-            },
-            async setItem(key, value) {
-                localStorage.setItem(key, value); // Keep local backup
-                try {
-                    const parsed = JSON.parse(value);
-                    await db.collection('sharma_edu_db').doc(key).set({ value: parsed });
-                } catch (e) { console.error("Cloud write error", e); }
+        // ================= CLOUD SYNC (Firebase Firestore) =================
+        // Keeps all app data in the cloud so the teacher's phone/laptop and every parent's phone see the SAME data.
+        // localStorage stays as a fast local copy; every change is mirrored to Firestore, and changes made on other devices arrive live.
+        const FIREBASE_CONFIG = {
+            apiKey: 'AIzaSyDPWCSP5Mst4fT3AFYm8yFRZN1mQhWKkoQ',
+            authDomain: 'sharma-eduacademy.firebaseapp.com',
+            projectId: 'sharma-eduacademy',
+            storageBucket: 'sharma-eduacademy.firebasestorage.app',
+            messagingSenderId: '254830849030',
+            appId: '1:254830849030:web:e17f8558e0b7cae145e787'
+           
+        };
+
+        const Cloud = (() => {
+            // Lists are stored one document per item (so one big photo never hits the 1 MB document limit).
+            // 'asc' = oldest first (items are pushed), 'desc' = newest first (items are unshifted).
+            const LISTS = {
+                'sharma_edu_students': 'asc',
+                'sharma_edu_messages': 'asc',
+                'sharma_edu_notices': 'desc',
+                'sharma_edu_left_students': 'desc',
+                'sharma_edu_homework': 'desc',
+                'sharma_edu_proofs': 'desc',
+                'sharma_edu_doubts': 'desc',
+                'sharma_edu_manual_receipts': 'desc'
+            };
+            // Objects stored one document per top-level key (date / student id)
+            const MAPS = ['sharma_edu_attendance', 'sharma_edu_fee_ledger'];
+            // Single values (PIN hash, UPI settings...) stored as one document each in a shared collection
+            const META = ['sharma_edu_upi', 'sharma_edu_pin_hash', 'sharma_edu_pin_salt', 'sharma_edu_pin_weak', 'sharma_edu_fee_migrated'];
+            const META_COL = 'sharma_edu_meta';
+            const INIT_DOC = 'cloud_init';
+            const MAX_DOC = 900000; // characters; Firestore's limit is about 1 MB per document
+            const ALL_KEYS = Object.keys(LISTS).concat(MAPS, META);
+
+            const nativeSet = Storage.prototype.setItem;
+            const nativeRemove = Storage.prototype.removeItem;
+            const nativeGet = Storage.prototype.getItem;
+
+            let db = null;
+            let live = false;
+            let queue = Promise.resolve();
+            let lastCommitOk = true;
+            let retryCount = 0;
+            let retryTimer = null;
+            const shadow = {};   // collection -> Map(docId -> { j: jsonString, t: orderNumber }) = what the cloud holds
+            const api = { onStatus: () => {}, onRemote: () => {}, mode: 'local' };
+
+            const kind = (k) => LISTS[k] ? 'list' : (MAPS.indexOf(k) >= 0 ? 'map' : (META.indexOf(k) >= 0 ? 'meta' : null));
+            const colOf = (k) => kind(k) === 'meta' ? META_COL : k;
+            const sh = (col) => shadow[col] || (shadow[col] = new Map());
+            const readLocal = (k) => nativeGet.call(localStorage, k);
+            const hasMarker = () => sh(META_COL).has(INIT_DOC);
+
+            function isConfigured(cfg) {
+                return !!(cfg && cfg.apiKey && cfg.projectId && !/^YOUR_/.test(cfg.apiKey) && !/^YOUR_/.test(cfg.projectId));
             }
+
+            // value of one localStorage key -> Map(docId -> json)
+            function docsFor(key, value) {
+                const out = new Map();
+                const k = kind(key);
+                if (value === null || value === undefined) return out;
+                if (k === 'meta') { out.set(key, String(value)); return out; }
+                let parsed;
+                try { parsed = JSON.parse(value); } catch (e) { return null; }
+                if (k === 'list') {
+                    if (!Array.isArray(parsed)) return null;
+                    parsed.forEach((it) => { if (it && it.id !== undefined && it.id !== null) out.set(String(it.id), JSON.stringify(it)); });
+                } else {
+                    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
+                    Object.keys(parsed).forEach((id) => { if (id.indexOf('/') < 0) out.set(id, JSON.stringify(parsed[id])); });
+                }
+                return out;
+            }
+
+            // what the cloud holds -> value for localStorage
+            function rebuild(key) {
+                const k = kind(key);
+                const s = sh(colOf(key));
+                if (k === 'meta') { const d = s.get(key); return d ? d.j : null; }
+                if (s.size === 0 && !hasMarker()) return null; // brand-new cloud: let the app create its defaults
+                if (k === 'map') {
+                    const o = {};
+                    s.forEach((v, id) => { try { o[id] = JSON.parse(v.j); } catch (e) { /* skip bad doc */ } });
+                    return JSON.stringify(o);
+                }
+                const arr = [];
+                s.forEach((v) => arr.push(v));
+                arr.sort((a, b) => LISTS[key] === 'desc' ? b.t - a.t : a.t - b.t);
+                const items = [];
+                arr.forEach((v) => { try { items.push(JSON.parse(v.j)); } catch (e) { /* skip bad doc */ } });
+                return JSON.stringify(items);
+            }
+
+            function applyKey(key) {
+                const value = rebuild(key);
+                try {
+                    if (value === null) {
+                        if (readLocal(key) !== null) nativeRemove.call(localStorage, key);
+                    } else if (readLocal(key) !== value) {
+                        nativeSet.call(localStorage, key, value);
+                    }
+                } catch (err) {
+                    api.onStatus('This device\'s storage is full, so the latest data could not be loaded. Please clear the browser data for this site and reload.', 'error');
+                }
+            }
+
+            function tooBig() {
+                try { alert('One item (probably a photo) is too large to save to the cloud. Please use a smaller picture.'); } catch (e) { /* ignore */ }
+            }
+
+            // Compare the new local value with what the cloud holds and send only the differences
+            function push(key, value) {
+                if (!db || !kind(key)) return;
+                const k = kind(key);
+                if (value === null && k !== 'meta') return; // never wipe a whole list from here
+                const next = docsFor(key, value);
+                if (!next) return;
+                const col = colOf(key);
+                const s = sh(col);
+                const ops = [];
+
+                let order = null, base = 0;
+                if (k === 'list') {
+                    order = new Map();
+                    JSON.parse(value).forEach((it) => { if (it && it.id !== undefined && it.id !== null) order.set(String(it.id), order.size); });
+                    let maxT = 0;
+                    s.forEach((v) => { if (v.t > maxT) maxT = v.t; });
+                    base = Math.max(Date.now(), maxT + 1);
+                }
+                const n = order ? order.size : 0;
+
+                next.forEach((j, id) => {
+                    const old = s.get(id);
+                    if (old && old.j === j) return;
+                    if (j.length > MAX_DOC) { tooBig(); return; }
+                    let t = old ? old.t : 0;
+                    if (k === 'list' && !old) {
+                        const i = order.get(id);
+                        t = LISTS[key] === 'desc' ? base + (n - i) : base + i;
+                    }
+                    ops.push({ type: 'set', col, id, j, t, old });
+                    s.set(id, { j, t });
+                });
+
+                const owned = k === 'meta' ? (s.has(key) ? [key] : []) : Array.from(s.keys());
+                owned.forEach((id) => {
+                    if (!next.has(id)) {
+                        ops.push({ type: 'del', col, id, old: s.get(id) });
+                        s.delete(id);
+                    }
+                });
+
+                if (ops.length) enqueue(ops);
+            }
+
+            function rollback(ops) {
+                ops.forEach((op) => {
+                    const s = sh(op.col);
+                    if (op.old) s.set(op.id, op.old); else s.delete(op.id);
+                });
+            }
+
+            function enqueue(ops) {
+                queue = queue.then(() => commit(ops));
+            }
+
+            function commit(ops) {
+                let p = Promise.resolve();
+                for (let i = 0; i < ops.length; i += 400) {
+                    const part = ops.slice(i, i + 400);
+                    p = p.then(() => {
+                        const batch = db.batch();
+                        part.forEach((op) => {
+                            const ref = db.collection(op.col).doc(op.id);
+                            if (op.type === 'set') batch.set(ref, { j: op.j, t: op.t }); else batch.delete(ref);
+                        });
+                        return batch.commit();
+                    });
+                }
+                return p.then(() => {
+                    lastCommitOk = true;
+                    retryCount = 0;
+                    api.onStatus('', 'ok');
+                }).catch((err) => {
+                    lastCommitOk = false;
+                    rollback(ops);
+                    reportSaveError(err);
+                });
+            }
+
+            function reportSaveError(err) {
+                const denied = err && err.code === 'permission-denied';
+                api.onStatus(denied
+                    ? 'The cloud database refused the save (permission denied). Please check the Firestore rules.'
+                    : 'Could not save to the cloud. Please check the internet. Retrying...', 'error');
+                if (!denied && retryCount < 8) {
+                    retryCount++;
+                    clearTimeout(retryTimer);
+                    retryTimer = setTimeout(resyncAll, 8000);
+                }
+            }
+
+            function resyncAll() {
+                ALL_KEYS.forEach((k) => { const v = readLocal(k); if (v !== null) push(k, v); });
+            }
+
+            // Changes made on other devices
+            function handleChanges(col, snap) {
+                const s = sh(col);
+                const touched = new Set();
+                snap.docChanges().forEach((ch) => {
+                    const id = ch.doc.id;
+                    if (ch.type === 'removed') {
+                        if (s.has(id)) { s.delete(id); touched.add(id); }
+                        return;
+                    }
+                    if (ch.doc.metadata && ch.doc.metadata.hasPendingWrites) return; // our own write echoing back
+                    const x = ch.doc.data();
+                    const cur = s.get(id);
+                    if (cur && cur.j === x.j) { cur.t = x.t || 0; return; }
+                    s.set(id, { j: x.j, t: x.t || 0 });
+                    touched.add(id);
+                });
+                if (!touched.size || !live) return;
+                const keys = col === META_COL ? META.filter((k) => touched.has(k)) : [col];
+                if (!keys.length) return;
+                keys.forEach(applyKey);
+                api.onRemote(keys);
+            }
+
+            function listen(col) {
+                return new Promise((resolve, reject) => {
+                    let first = true;
+                    db.collection(col).onSnapshot({ includeMetadataChanges: true }, (snap) => {
+                        if (first) {
+                            if (snap.metadata.fromCache) return; // wait for the real server answer
+                            first = false;
+                            const m = sh(col);
+                            m.clear();
+                            snap.docs.forEach((d) => { const x = d.data(); m.set(d.id, { j: x.j, t: x.t || 0 }); });
+                            resolve();
+                            return;
+                        }
+                        handleChanges(col, snap);
+                    }, (err) => {
+                        if (first) { first = false; reject(err); } else { reportSaveError(err); }
+                    });
+                });
+            }
+
+            function localHasData() {
+                try {
+                    const st = JSON.parse(readLocal('sharma_edu_students') || '[]');
+                    if (Array.isArray(st) && st.length > 0) return true;
+                } catch (e) { /* ignore */ }
+                return !!(readLocal('sharma_edu_pin_hash') || readLocal('sharma_edu_pin'));
+            }
+
+            function backupLocal() {
+                try {
+                    const snap = {};
+                    ALL_KEYS.forEach((k) => { const v = readLocal(k); if (v !== null) snap[k] = v; });
+                    nativeSet.call(localStorage, 'sharma_edu_pre_cloud_backup', JSON.stringify(snap));
+                } catch (e) { /* storage full: skip the safety copy */ }
+            }
+
+            async function init() {
+                if (!isConfigured(FIREBASE_CONFIG)) {
+                    api.mode = 'local';
+                    api.onStatus('Cloud sync is not set up yet, so data is saved on THIS device only. Add your Firebase settings (FIREBASE_CONFIG) to enable it.', 'warn');
+                    return 'local';
+                }
+                if (typeof firebase === 'undefined') {
+                    throw new Error('The Firebase library could not be loaded. Please check your internet connection.');
+                }
+                firebase.initializeApp(FIREBASE_CONFIG);
+                db = firebase.firestore();
+                try { db.settings({ experimentalAutoDetectLongPolling: true, merge: true }); } catch (e) { /* ignore */ }
+                try { await db.enablePersistence({ synchronizeTabs: true }); } catch (e) { /* not supported here: fine */ }
+
+                const cols = Object.keys(LISTS).concat(MAPS, [META_COL]);
+                let timer;
+                const timeout = new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('Could not reach the cloud database (timeout). Please check your internet connection and the Firebase settings.')), 25000); });
+                await Promise.race([Promise.all(cols.map(listen)), timeout]);
+                clearTimeout(timer);
+
+                const marker = hasMarker();
+                if (!marker && localHasData() &&
+                    confirm('The cloud database is empty, but this device already has saved data.\n\nClick OK to UPLOAD this device\'s data to the cloud (do this only on the teacher\'s own device).\nClick Cancel to start with an empty cloud.')) {
+                    // First-time upload of this device's data
+                    live = true;
+                    ALL_KEYS.forEach((k) => { const v = readLocal(k); if (v !== null) push(k, v); });
+                    await db.collection(META_COL).doc(INIT_DOC).set({ j: '1', t: 0 });
+                    sh(META_COL).set(INIT_DOC, { j: '1', t: 0 });
+                    await queue;
+                    if (!lastCommitOk) throw new Error('Could not upload the data to the cloud. Please try again.');
+                } else {
+                    if (!marker && localHasData()) backupLocal(); // declined upload: keep a safety copy on this device
+                    ALL_KEYS.forEach(applyKey);              // the cloud is the single source of truth
+                    if (!marker) {
+                        await db.collection(META_COL).doc(INIT_DOC).set({ j: '1', t: 0 });
+                        sh(META_COL).set(INIT_DOC, { j: '1', t: 0 });
+                    }
+                    live = true;
+                }
+                if (typeof window !== 'undefined' && window.addEventListener) window.addEventListener('online', resyncAll);
+                api.mode = 'cloud';
+                return 'cloud';
+            }
+
+            // Mirror every write to the app's keys
+            Storage.prototype.setItem = function (key, value) {
+                nativeSet.call(this, key, value);
+                if (live && this === localStorage && kind(key)) push(key, String(value));
+            };
+            Storage.prototype.removeItem = function (key) {
+                nativeRemove.call(this, key);
+                if (live && this === localStorage && kind(key)) push(key, null);
+            };
+
+            api.init = init;
+            api.flush = () => queue;
+            return api;
+        })();
+
+        Cloud.onStatus = (msg, level) => {
+            const b = document.getElementById('cloudBanner');
+            if (!b) return;
+            if (!msg) { b.style.display = 'none'; return; }
+            b.style.display = 'block';
+            b.style.background = level === 'error' ? '#fee2e2' : '#fef3c7';
+            b.style.color = level === 'error' ? '#991b1b' : '#92400e';
+            b.innerText = msg;
         };
-        
-        // ---------- FIREBASE CONFIGURATION ----------
-        const firebaseConfig = {
-            apiKey: "AIzaSyDPWCSP5Mst4fT3AFYm8yFRZN1mQhWkkoQ",
-            authDomain: "sharma-eduacademy.firebaseapp.com",
-            projectId: "sharma-eduacademy",
-            storageBucket: "sharma-eduacademy.firebasestorage.app",
-            messagingSenderId: "254830849030",
-            appId: "1:254830849030:web:e17f8558e0b7cae145e787",
-            measurementId: "G-GSMKDJ966P"
-        };
-        // Initialize Firebase
-        firebase.initializeApp(firebaseConfig);
-        const db = firebase.firestore();
+
         // ---------- EMAIL (EmailJS) CONFIGURATION ----------
         // Fill these 3 values from your EmailJS dashboard (see setup steps). Until then PIN recovery by email stays disabled.
         const EMAILJS_CONFIG = {
@@ -1037,25 +1349,26 @@
                 this.initData();
                 this.setupEventListeners();
                 this.refreshTeacherPinHint();
-                       }
-async initData() {
-                if (!localStorage.getItem(DB_KEYS.UPI_CONFIG)) {
-                    await CloudDB.setItem(DB_KEYS.UPI_CONFIG, JSON.stringify({ upiId: 'sharmaedu@upi', payeeName: 'Sharma Eduacademy' }));
+            }
+
+            initData() {
+                                if (!localStorage.getItem(DB_KEYS.UPI_CONFIG)) {
+                    localStorage.setItem(DB_KEYS.UPI_CONFIG, JSON.stringify({ upiId: 'sharmaedu@upi', payeeName: 'Sharma Eduacademy' }));
                 }
-                if (!localStorage.getItem(DB_KEYS.STUDENTS)) await CloudDB.setItem(DB_KEYS.STUDENTS, JSON.stringify(defaultStudents));
-                if (!localStorage.getItem(DB_KEYS.ATTENDANCE)) await CloudDB.setItem(DB_KEYS.ATTENDANCE, JSON.stringify({}));
-                if (!localStorage.getItem(DB_KEYS.HOMEWORK)) await CloudDB.setItem(DB_KEYS.HOMEWORK, JSON.stringify([]));
-                if (!localStorage.getItem(DB_KEYS.NOTICES)) await CloudDB.setItem(DB_KEYS.NOTICES, JSON.stringify(defaultNotices));
-                if (!localStorage.getItem(DB_KEYS.PROOFS)) await CloudDB.setItem(DB_KEYS.PROOFS, JSON.stringify([]));
-                if (!localStorage.getItem(DB_KEYS.MESSAGES)) await CloudDB.setItem(DB_KEYS.MESSAGES, JSON.stringify([]));
-                if (!localStorage.getItem(DB_KEYS.DOUBTS)) await CloudDB.setItem(DB_KEYS.DOUBTS, JSON.stringify([]));
-                if (!localStorage.getItem(DB_KEYS.LEFT_STUDENTS)) await CloudDB.setItem(DB_KEYS.LEFT_STUDENTS, JSON.stringify([]));
-                if (!localStorage.getItem(DB_KEYS.MANUAL_RECEIPTS)) await CloudDB.setItem(DB_KEYS.MANUAL_RECEIPTS, JSON.stringify([]));
-                if (!localStorage.getItem(DB_KEYS.LEDGER)) await CloudDB.setItem(DB_KEYS.LEDGER, JSON.stringify({}));
-                
+                if (!localStorage.getItem(DB_KEYS.STUDENTS)) localStorage.setItem(DB_KEYS.STUDENTS, JSON.stringify(defaultStudents));
+                if (!localStorage.getItem(DB_KEYS.ATTENDANCE)) localStorage.setItem(DB_KEYS.ATTENDANCE, JSON.stringify({}));
+                if (!localStorage.getItem(DB_KEYS.HOMEWORK)) localStorage.setItem(DB_KEYS.HOMEWORK, JSON.stringify([]));
+                if (!localStorage.getItem(DB_KEYS.NOTICES)) localStorage.setItem(DB_KEYS.NOTICES, JSON.stringify(defaultNotices));
+                if (!localStorage.getItem(DB_KEYS.PROOFS)) localStorage.setItem(DB_KEYS.PROOFS, JSON.stringify([]));
+                if (!localStorage.getItem(DB_KEYS.MESSAGES)) localStorage.setItem(DB_KEYS.MESSAGES, JSON.stringify([]));
+                if (!localStorage.getItem(DB_KEYS.DOUBTS)) localStorage.setItem(DB_KEYS.DOUBTS, JSON.stringify([]));
+                if (!localStorage.getItem(DB_KEYS.LEFT_STUDENTS)) localStorage.setItem(DB_KEYS.LEFT_STUDENTS, JSON.stringify([]));
+                if (!localStorage.getItem(DB_KEYS.MANUAL_RECEIPTS)) localStorage.setItem(DB_KEYS.MANUAL_RECEIPTS, JSON.stringify([]));
+                if (!localStorage.getItem(DB_KEYS.LEDGER)) localStorage.setItem(DB_KEYS.LEDGER, JSON.stringify({}));
                 this.migrateFees();
                 this.pinReady = this.migratePin();
 
+                // Set default attendance date to today
                 const today = new Date().toISOString().split('T')[0];
                 const dateInput = document.getElementById('attendanceDate');
                 if (dateInput) dateInput.value = today;
@@ -1470,7 +1783,7 @@ async initData() {
                         });
                         localStorage.setItem(DB_KEYS.FEE_MIGRATED, '1');
                         alert('Backup restored successfully. The page will now reload.');
-                        location.reload();
+                        Cloud.flush().then(() => location.reload());
                     } catch (err) {
                         alert('This file is not a valid Sharma Eduacademy backup.');
                     }
@@ -3145,6 +3458,36 @@ async initData() {
                 this.renderParentChatTab();
             }
 
+            // --- LIVE UPDATE FROM OTHER DEVICES (cloud) ---
+            refreshFromCloud() {
+                clearTimeout(this.cloudRefreshTimer);
+                const run = () => {
+                    const ae = document.activeElement;
+                    if (ae && /^(INPUT|TEXTAREA|SELECT)$/.test(ae.tagName) && ae.closest('.teacher-tab-content, .student-tab-content')) {
+                        this.cloudRefreshTimer = setTimeout(run, 3000); // do not disturb someone who is typing
+                        return;
+                    }
+                    try {
+                        if (this.currentUserRole === 'teacher') {
+                            const active = Array.from(document.querySelectorAll('.teacher-tab-content')).find(t => !t.classList.contains('hidden'));
+                            if (!active) return;
+                            const name = active.id.replace('teacherTab-', '');
+                            if (name === 'attendance' || name === 'settings') return; // forms in progress
+                            this.switchTeacherTab(name);
+                            if (name === 'messages' && this.activeTeacherChatStudentId) this.selectTeacherChatStudent(this.activeTeacherChatStudentId);
+                            else this.updateVerificationBadge();
+                        } else if (this.currentUserRole === 'student' && this.currentStudent) {
+                            const still = JSON.parse(localStorage.getItem(DB_KEYS.STUDENTS)).find(x => x.id === this.currentStudent.id);
+                            if (!still) { this.logout(); alert('Your account is no longer active. Please contact the teacher.'); return; }
+                            const active = Array.from(document.querySelectorAll('.student-tab-content')).find(t => !t.classList.contains('hidden'));
+                            if (!active) return;
+                            this.switchStudentTab(active.id.replace('spTab-', ''));
+                        }
+                    } catch (err) { console.warn('Live refresh skipped:', err); }
+                };
+                this.cloudRefreshTimer = setTimeout(run, 600);
+            }
+
             // --- UTILS / MODALS ---
             openImageModal(src) {
                 document.getElementById('modalPreviewImage').src = src;
@@ -3156,8 +3499,18 @@ async initData() {
             }
         }
 
-        // Initialize App
-        const app = new TuitionApp();
+        // Initialize App (only after the cloud data has been loaded, so every device starts with the same data)
+        let app;
+        Cloud.init().then(() => {
+            app = new TuitionApp();
+            Cloud.onRemote = () => { if (app) app.refreshFromCloud(); };
+            const ov = document.getElementById('cloudOverlay');
+            if (ov) ov.style.display = 'none';
+        }).catch((err) => {
+            console.error(err);
+            document.getElementById('cloudOverlayText').innerText = (err && err.message ? err.message : 'Could not connect to the cloud database.') + (err && err.code === 'permission-denied' ? ' (Firestore rules are blocking access.)' : '');
+            document.getElementById('cloudRetryBtn').style.display = 'inline-block';
+        });
     </script>
 </body>
 </html>
