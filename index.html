@@ -3499,6 +3499,1244 @@
             }
         }
 
+                // =====================================================================
+        // UPDATE PACK 2  (paste this whole block ABOVE the line "// Initialize App ...")
+        //  1. Stay logged in when the page is refreshed
+        //  2. Rank always follows EduPoints (same points = same rank)
+        //  3. Fee due day for every student (different admission dates)
+        //  4. "+" button to add EduPoints
+        //  5. Brothers/sisters share ONE login and switch profiles at the top
+        //  6. Leaderboard tab for the teacher
+        //  7. Edit / delete / clear announcements and homework
+        // A method here with the same name as an old method REPLACES the old one,
+        // so you do NOT need to delete any old code.
+        // =====================================================================
+        (function () {
+            const P = TuitionApp.prototype;
+            const KEY_SESSION = 'sharma_edu_session';
+            const IDLE_MS = 20 * 60 * 1000;
+            const read = (k) => JSON.parse(localStorage.getItem(DB_KEYS[k]));
+
+            // ---------- 1. STAY LOGGED IN ON REFRESH ----------
+            // The login is kept only for this browser tab (closing the tab/browser still logs out)
+            // and expires after 20 minutes without any click or key press.
+            P.saveSession = function (data) {
+                try { sessionStorage.setItem(KEY_SESSION, JSON.stringify({ ...data, ts: Date.now() })); } catch (e) { /* ignore */ }
+                if (!this._sessionTouchOn) {
+                    this._sessionTouchOn = true;
+                    const touch = () => {
+                        try {
+                            const raw = sessionStorage.getItem(KEY_SESSION);
+                            if (!raw) return;
+                            const s = JSON.parse(raw);
+                            s.ts = Date.now();
+                            sessionStorage.setItem(KEY_SESSION, JSON.stringify(s));
+                        } catch (e) { /* ignore */ }
+                    };
+                    ['click', 'keydown', 'touchstart'].forEach((ev) => document.addEventListener(ev, touch, true));
+                }
+            };
+
+            P.clearSession = function () {
+                try { sessionStorage.removeItem(KEY_SESSION); } catch (e) { /* ignore */ }
+            };
+
+            P.openStudentPortalFor = function (st) {
+                this.currentUserRole = 'student';
+                this.currentStudent = st;
+                document.getElementById('loginSection').classList.add('hidden');
+                document.getElementById('studentPortal').classList.remove('hidden');
+                document.getElementById('userInfoHeader').classList.remove('hidden');
+                document.getElementById('userBadge').innerText = `Student: ${st.name}`;
+                this.renderStudentPortal();
+                this.startIdleTimer();
+            };
+
+            P.restoreSession = function () {
+                if (this._sessionRestored || this.currentUserRole) return;
+                this._sessionRestored = true;
+                let s = null;
+                try { s = JSON.parse(sessionStorage.getItem(KEY_SESSION) || 'null'); } catch (e) { /* ignore */ }
+                if (!s || !s.role || Date.now() - (s.ts || 0) > IDLE_MS) { this.clearSession(); return; }
+                if (s.role === 'teacher') {
+                    this.completeTeacherLogin();
+                } else if (s.role === 'student') {
+                    const st = read('STUDENTS').find((x) => x.id === s.studentId);
+                    if (!st) { this.clearSession(); return; }
+                    this.openStudentPortalFor(st);
+                }
+            };
+
+            const origHint = P.refreshTeacherPinHint;
+            P.refreshTeacherPinHint = function () {
+                origHint.call(this);
+                if (!this._sessionRestored) setTimeout(() => this.restoreSession(), 0);
+            };
+
+            const origTeacherLogin = P.completeTeacherLogin;
+            P.completeTeacherLogin = function () {
+                origTeacherLogin.call(this);
+                this.saveSession({ role: 'teacher' });
+            };
+
+            const origLogout = P.logout;
+            P.logout = function () {
+                this.clearSession();
+                origLogout.call(this);
+                const sw = document.getElementById('siblingSwitcher');
+                if (sw) { sw.classList.add('hidden'); sw.innerHTML = ''; }
+            };
+
+            // ---------- 2. RANK FOLLOWS EDUPOINTS ----------
+            // Same EduPoints = same rank (for example 100, 100, 90 -> #1, #1, #3)
+            P.getRank = function (st, scope) {
+                const all = read('STUDENTS');
+                const pool = scope === 'class' ? all.filter((x) => x.class === st.class) : all;
+                const pts = Number(st.points) || 0;
+                return pool.filter((x) => (Number(x.points) || 0) > pts).length + 1;
+            };
+
+            const origDash = P.renderStudentDashboardTab;
+            P.renderStudentDashboardTab = function () {
+                origDash.call(this);
+                const s = this.currentStudent;
+                if (!s) return;
+                document.getElementById('spClassRank').innerText = '#' + this.getRank(s, 'class');
+                const pts = document.getElementById('spPoints');
+                if (pts) pts.innerText = `${s.points || 0} Points`;
+            };
+
+            // ---------- 3. FEE DUE DAY (different admission dates) ----------
+            // A student's month becomes "due" on their own due day (for example the 15th).
+            // Before that day the current month is shown as "not due yet" and is not counted in the dues.
+            P.ordinal = function (n) {
+                const s = ['th', 'st', 'nd', 'rd'];
+                const v = n % 100;
+                return n + (s[(v - 20) % 10] || s[v] || s[0]);
+            };
+
+            P.dueDayOf = function (st) {
+                return Math.min(28, Math.max(1, parseInt(st.dueDay, 10) || 1));
+            };
+
+            P.isMonthDueNow = function (st, key) {
+                const cur = this.currentMonthKey();
+                if (key < cur) return true;
+                if (key > cur) return false;
+                return new Date().getDate() >= this.dueDayOf(st);
+            };
+
+            P.getDueMonths = function (student, ledger) {
+                ledger = ledger || this.getLedger();
+                const cur = this.currentMonthKey();
+                const start = student.joinMonth || cur;
+                if (start > cur) return [];
+                const paid = ledger[student.id] || {};
+                return this.monthsBetween(start, cur).filter((k) => !paid[k] && this.isMonthDueNow(student, k));
+            };
+
+            P.renderStudentMonths = function () {
+                const s = this.currentStudent;
+                const cur = this.currentMonthKey();
+                const start = s.joinMonth || cur;
+                const fee = Number(s.feeAmount) || 0;
+                const paid = this.getLedger()[s.id] || {};
+                const waiting = new Set();
+                JSON.parse(localStorage.getItem(DB_KEYS.PROOFS))
+                    .filter((p) => p.studentId === s.id && p.status === 'Pending')
+                    .forEach((p) => ((p.months && p.months.length) ? p.months : [cur]).forEach((k) => waiting.add(k)));
+
+                const keys = start > cur ? [] : this.monthsBetween(start, cur);
+                const box = document.getElementById('spMonthsList');
+                if (keys.length === 0) {
+                    box.innerHTML = '<p class="text-xs text-slate-400">No fee months yet.</p>';
+                    return;
+                }
+                box.innerHTML = keys.map((k) => {
+                    const label = this.monthLabel(k);
+                    if (paid[k]) {
+                        return `<div class="flex justify-between items-center p-2.5 bg-green-50 border border-green-200 rounded-xl text-xs"><span class="font-semibold text-slate-800">${label}</span><span class="font-bold text-green-700">Paid</span></div>`;
+                    }
+                    if (waiting.has(k)) {
+                        return `<div class="flex justify-between items-center p-2.5 bg-amber-50 border border-amber-200 rounded-xl text-xs"><span class="font-semibold text-slate-800">${label}</span><span class="font-bold text-amber-700">Awaiting teacher approval</span></div>`;
+                    }
+                    if (!this.isMonthDueNow(s, k)) {
+                        const mon = new Date(Number(k.split('-')[0]), Number(k.split('-')[1]) - 1, 1).toLocaleString('default', { month: 'short' });
+                        return `<label class="flex justify-between items-center p-2.5 bg-slate-50 border border-slate-200 rounded-xl text-xs cursor-pointer"><span class="font-semibold text-slate-800"><input type="checkbox" class="pay-month-cb accent-emerald-600 mr-2" value="${k}" onchange="app.updateSelectedMonths()">${label}</span><span class="font-bold text-slate-500">Not due yet (due ${this.dueDayOf(s)} ${mon}) - ₹${fee}</span></label>`;
+                    }
+                    return `<label class="flex justify-between items-center p-2.5 bg-rose-50 border border-rose-200 rounded-xl text-xs cursor-pointer"><span class="font-semibold text-slate-800"><input type="checkbox" class="pay-month-cb accent-emerald-600 mr-2" value="${k}" checked onchange="app.updateSelectedMonths()">${label}</span><span class="font-bold text-rose-600">Due ₹${fee}</span></label>`;
+                }).join('');
+            };
+
+            const origFees = P.renderStudentFeesTab;
+            P.renderStudentFeesTab = function () {
+                origFees.call(this);
+                const s = this.currentStudent;
+                if (!s) return;
+                document.getElementById('spFeeAmount').innerHTML = `₹${esc(s.feeAmount)}<span class="block text-xs font-medium text-slate-500">Due on the ${this.ordinal(this.dueDayOf(s))} of every month</span>`;
+            };
+
+            // ---------- 4. "+" BUTTON FOR EDUPOINTS ----------
+            P.addStudentPoints = function (id) {
+                const v = prompt('How many EduPoints do you want to ADD?', '10');
+                if (v === null) return;
+                const n = parseInt(v, 10);
+                if (isNaN(n) || n <= 0) { alert('Please enter a number greater than 0.'); return; }
+                const students = read('STUDENTS').map((s) => s.id === id ? { ...s, points: (Number(s.points) || 0) + n } : s);
+                localStorage.setItem(DB_KEYS.STUDENTS, JSON.stringify(students));
+                this.renderStudentsTable();
+            };
+
+            // ---------- 5. BROTHERS / SISTERS: ONE LOGIN, SWITCH PROFILES ----------
+            // Students with the same mobile number AND the same password are treated as one family.
+            P.getSiblings = function (st) {
+                st = st || this.currentStudent;
+                if (!st) return [];
+                return read('STUDENTS').filter((x) => x.mobile === st.mobile && x.password === st.password);
+            };
+
+            P.renderSiblingSwitcher = function () {
+                const box = document.getElementById('siblingSwitcher');
+                if (!box || !this.currentStudent) return;
+                const sibs = this.getSiblings(this.currentStudent);
+                if (sibs.length < 2) { box.classList.add('hidden'); box.innerHTML = ''; return; }
+                box.classList.remove('hidden');
+                box.innerHTML = `<p class="text-xs font-semibold text-slate-500 mb-2"><i class="fa-solid fa-users mr-1"></i> Your children - tap a name to switch profile</p>
+                    <div class="flex flex-wrap gap-2">${sibs.map((x) => `
+                        <button type="button" onclick="app.switchSibling('${x.id}')" class="px-4 py-2 rounded-xl text-sm font-semibold border ${x.id === this.currentStudent.id ? 'bg-emerald-600 text-white border-emerald-600 shadow' : 'bg-white text-slate-700 border-slate-300 hover:bg-emerald-50'}">
+                            ${esc(x.name)} <span class="text-xs font-normal opacity-80">(Class ${esc(x.class)})</span>
+                        </button>`).join('')}</div>`;
+            };
+
+            P.switchSibling = function (id) {
+                const st = this.getSiblings(this.currentStudent).find((x) => x.id === id);
+                if (!st) return;
+                this.currentStudent = st;
+                this.tempProofPhotoBase64 = null;
+                this.tempDoubtPhotoBase64 = null;
+                ['proofPhotoPreviewContainer', 'doubtPhotoPreviewContainer'].forEach((i) => { const el = document.getElementById(i); if (el) el.classList.add('hidden'); });
+                document.getElementById('userBadge').innerText = `Student: ${st.name}`;
+                this.renderStudentPortal();
+            };
+
+            const origPortal = P.renderStudentPortal;
+            P.renderStudentPortal = function () {
+                origPortal.call(this);
+                this.renderSiblingSwitcher();
+                this.saveSession({ role: 'student', studentId: this.currentStudent.id });
+            };
+
+            // dropdown inside the Add / Edit student form
+            P.fillSiblingPicker = function (excludeId) {
+                const pick = document.getElementById('modalSiblingPick');
+                if (!pick) return;
+                pick.innerHTML = '<option value="">- Not a sibling (separate login) -</option>' +
+                    read('STUDENTS').filter((s) => s.id !== excludeId).map((s) => `<option value="${esc(s.id)}">${esc(s.name)} (Class ${esc(s.class)}, ${esc(s.mobile)})</option>`).join('');
+                const note = document.getElementById('modalSiblingNote');
+                if (note) {
+                    const me = excludeId ? read('STUDENTS').find((s) => s.id === excludeId) : null;
+                    const linked = me ? this.getSiblings(me).filter((s) => s.id !== me.id) : [];
+                    note.innerText = linked.length ? 'Linked with: ' + linked.map((s) => s.name).join(', ') : '';
+                }
+            };
+
+            P.onSiblingPick = function (id) {
+                if (!id) return;
+                const s = read('STUDENTS').find((x) => x.id === id);
+                if (!s) return;
+                document.getElementById('modalStudentMobile').value = s.mobile;
+                document.getElementById('modalStudentPassword').value = s.password;
+                document.getElementById('modalParentName').value = s.parentName || '';
+                document.getElementById('modalMotherName').value = s.motherName || '';
+                document.getElementById('modalParentMobile').value = s.parentMobile || '';
+            };
+
+            const origAdd = P.openAddStudentModal;
+            P.openAddStudentModal = function () {
+                origAdd.call(this);
+                document.getElementById('modalStudentDueDay').value = Math.min(28, new Date().getDate());
+                this.fillSiblingPicker('');
+            };
+
+            const origEdit = P.openEditStudentModal;
+            P.openEditStudentModal = function (id) {
+                origEdit.call(this, id);
+                const s = read('STUDENTS').find((x) => x.id === id);
+                document.getElementById('modalStudentDueDay').value = s ? (s.dueDay || 1) : 1;
+                this.fillSiblingPicker(id);
+            };
+
+            P.saveStudent = function (e) {
+                e.preventDefault();
+                const id = document.getElementById('studentEditId').value;
+                const name = document.getElementById('modalStudentName').value.trim();
+                const cls = document.getElementById('modalStudentClass').value.trim().replace(/^class\s*/i, '');
+                const mobile = document.getElementById('modalStudentMobile').value.trim();
+                const feeAmount = Number(document.getElementById('modalStudentFee').value);
+                const feeStatus = document.getElementById('modalStudentFeeStatus').value;
+                const password = document.getElementById('modalStudentPassword').value.trim();
+                const parentName = document.getElementById('modalParentName').value.trim();
+                const motherName = document.getElementById('modalMotherName').value.trim();
+                const parentMobile = document.getElementById('modalParentMobile').value.trim();
+                const dueDay = parseInt(document.getElementById('modalStudentDueDay').value, 10);
+                const cur = this.currentMonthKey();
+                let joinMonth = document.getElementById('modalStudentJoinMonth').value || cur;
+                if (joinMonth > cur) joinMonth = cur;
+
+                if (!name) { alert('Please enter the student name.'); return; }
+                if (!/^[A-Za-z0-9][A-Za-z0-9 \-]{0,9}$/.test(cls)) { alert('Class can contain only letters, numbers, space or hyphen (maximum 10 characters).'); return; }
+                if (!/^\d{10}$/.test(mobile)) { alert('Registered mobile number must be exactly 10 digits.'); return; }
+                if (parentMobile && !/^\d{10}$/.test(parentMobile)) { alert('Parent alternate mobile number must be exactly 10 digits.'); return; }
+                if (!(feeAmount > 0)) { alert('Please enter a valid monthly fee.'); return; }
+                if (!(dueDay >= 1 && dueDay <= 28)) { alert('Fee due day must be a number from 1 to 28.'); return; }
+                if (password.length < 4) { alert('Portal password must be at least 4 characters.'); return; }
+
+                let students = JSON.parse(localStorage.getItem(DB_KEYS.STUDENTS));
+
+                // If this student already shares a login with brothers/sisters, offer to change the whole family together
+                if (id) {
+                    const before = students.find((st) => st.id === id);
+                    if (before && (before.mobile !== mobile || before.password !== password)) {
+                        const group = students.filter((st) => st.id !== id && st.mobile === before.mobile && st.password === before.password);
+                        if (group.length && confirm(name + ' shares this login with ' + group.map((g) => g.name).join(', ') + '.\n\nOK = change the mobile/password of ALL of them (they stay linked).\nCancel = change only ' + name + ' (unlink).')) {
+                            students = students.map((st) => group.some((g) => g.id === st.id) ? { ...st, mobile, password } : st);
+                        }
+                    }
+                }
+
+                // The same mobile number is allowed only for brothers/sisters, who must then share the same password
+                const clash = students.find((st) => st.mobile === mobile && st.id !== id && st.password !== password);
+                if (clash) {
+                    alert('This mobile number is already used by ' + clash.name + ' with a different password.\n\nBrothers/sisters must have the SAME mobile number AND the SAME password. Use the "Link as brother/sister of" list in this form, or use a different mobile number.');
+                    return;
+                }
+
+                let savedStudent = null;
+
+                if (id) {
+                    students = students.map((st) => {
+                        if (st.id !== id) return st;
+                        savedStudent = { ...st, name, class: cls, mobile, feeAmount, password, parentName, motherName, parentMobile, joinMonth, dueDay };
+                        return savedStudent;
+                    });
+                } else {
+                    savedStudent = {
+                        id: Date.now().toString(),
+                        name,
+                        class: cls,
+                        mobile,
+                        feeAmount,
+                        feeStatus: 'Unpaid',
+                        password,
+                        parentName,
+                        motherName,
+                        parentMobile,
+                        joinMonth,
+                        dueDay,
+                        points: 100
+                    };
+                    students.push(savedStudent);
+                }
+
+                localStorage.setItem(DB_KEYS.STUDENTS, JSON.stringify(students));
+
+                // "Current Month Fee Status" in this form is applied to the current month in the fee ledger
+                const entry = (this.getLedger()[savedStudent.id] || {})[cur];
+                if (feeStatus === 'Paid' && !entry) {
+                    this.recordManualPayment(savedStudent, [cur]);
+                } else if (feeStatus === 'Unpaid' && entry) {
+                    if (entry.mode === 'Online') {
+                        alert('This month was paid online and approved with a receipt, so it cannot be changed to Unpaid here.');
+                    } else {
+                        this.undoMonth(savedStudent.id, cur);
+                    }
+                }
+                this.syncFeeStatuses();
+
+                this.closeStudentModal();
+                this.renderStudentsTable();
+                this.renderOverviewTab();
+            };
+
+            // Students table: sibling tag, "not due yet" status, "+" button and ranks
+            P.renderStudentsTable = function () {
+                const students = JSON.parse(localStorage.getItem(DB_KEYS.STUDENTS));
+                const ledger = this.getLedger();
+                const search = (document.getElementById('studentSearch')?.value || '').toLowerCase();
+                const tbody = document.getElementById('studentsTableBody');
+                const cur = this.currentMonthKey();
+
+                const filtered = students.filter((s) => s.name.toLowerCase().includes(search) || String(s.class).toLowerCase().includes(search));
+
+                tbody.innerHTML = filtered.map((s) => {
+                    const dueMonths = this.getDueMonths(s, ledger);
+                    const dueTotal = dueMonths.length * (Number(s.feeAmount) || 0);
+                    const dueHtml = dueMonths.length > 0
+                        ? `<span class="px-2.5 py-1 rounded-full text-xs font-bold bg-rose-100 text-rose-700" title="${esc(dueMonths.map((k) => this.monthLabel(k)).join(', '))}">${dueMonths.length} month${dueMonths.length > 1 ? 's' : ''} · ₹${dueTotal}</span>`
+                        : `<span class="px-2.5 py-1 rounded-full text-xs font-bold bg-green-100 text-green-700">No dues</span>`;
+                    const notDueYet = s.feeStatus !== 'Paid' && (s.joinMonth || cur) <= cur && !this.isMonthDueNow(s, cur);
+                    const statusHtml = s.feeStatus === 'Paid'
+                        ? `<span class="px-2.5 py-1 rounded-full text-xs font-bold bg-green-100 text-green-700">Paid</span>`
+                        : (notDueYet
+                            ? `<span class="px-2.5 py-1 rounded-full text-xs font-bold bg-amber-100 text-amber-700">Due on ${this.ordinal(this.dueDayOf(s))}</span>`
+                            : `<span class="px-2.5 py-1 rounded-full text-xs font-bold bg-rose-100 text-rose-700">Unpaid</span>`);
+                    const isSibling = students.filter((x) => x.mobile === s.mobile && x.password === s.password).length > 1;
+                    return `
+                    <tr class="hover:bg-slate-50 border-b border-slate-100">
+                        <td class="p-4 font-semibold text-slate-800">${esc(s.name)}${isSibling ? ' <span class="ml-1 text-[10px] font-bold bg-indigo-100 text-indigo-700 px-1.5 py-0.5 rounded-md" title="Shares one login with a brother/sister">Sibling</span>' : ''}</td>
+                        <td class="p-4">Class ${esc(s.class)}</td>
+                        <td class="p-4">${esc(s.mobile)}</td>
+                        <td class="p-4 font-medium">₹${s.feeAmount}</td>
+                        <td class="p-4">${statusHtml}</td>
+                        <td class="p-4">${dueHtml}</td>
+                        <td class="p-4">
+                            <div class="flex items-center gap-1 text-amber-600 font-bold">
+                                <i class="fa-solid fa-star text-xs"></i>
+                                <input type="number" min="0" value="${Number(s.points) || 0}" onchange="app.updateStudentPoints('${s.id}', this.value)" class="w-20 px-2 py-1 text-sm font-bold text-amber-600 rounded-lg border border-slate-300 focus:ring-2 focus:ring-amber-400 focus:outline-none">
+                                <button type="button" onclick="app.addStudentPoints('${s.id}')" title="Add EduPoints" class="w-7 h-7 rounded-lg bg-amber-100 hover:bg-amber-200 text-amber-700 font-bold text-base leading-none">+</button>
+                            </div>
+                            <p class="text-[10px] text-slate-500 font-semibold mt-1">Class rank #${this.getRank(s, 'class')} · Overall #${this.getRank(s, 'all')}</p>
+                        </td>
+                        <td class="p-4 text-right space-x-2 whitespace-nowrap">
+                            <button onclick="app.openFeesModal('${s.id}')" class="text-emerald-700 hover:text-emerald-900 font-medium text-xs bg-emerald-50 hover:bg-emerald-100 px-2.5 py-1.5 rounded-lg border border-emerald-200 transition">
+                                <i class="fa-solid fa-indian-rupee-sign"></i> Fees
+                            </button>
+                            <button onclick="app.openEditStudentModal('${s.id}')" class="text-indigo-600 hover:text-indigo-800 font-medium text-xs bg-indigo-50 hover:bg-indigo-100 px-2.5 py-1.5 rounded-lg border border-indigo-200 transition">
+                                <i class="fa-solid fa-pen-to-square"></i> Edit
+                            </button>
+                            <button onclick="app.deleteStudent('${s.id}')" class="text-rose-600 hover:text-rose-800 font-medium text-xs bg-rose-50 hover:bg-rose-100 px-2.5 py-1.5 rounded-lg border border-rose-200 transition">
+                                <i class="fa-solid fa-user-minus"></i> Leave
+                            </button>
+                        </td>
+                    </tr>`;
+                }).join('');
+            };
+
+            // ---------- 6. LEADERBOARD (teacher) ----------
+            P.renderLeaderboardTab = function () {
+                const sel = document.getElementById('lbClassFilter');
+                const body = document.getElementById('leaderboardBody');
+                if (!sel || !body) return;
+                const students = read('STUDENTS');
+                const classes = Array.from(new Set(students.map((s) => s.class))).sort((a, b) => String(a).localeCompare(String(b), undefined, { numeric: true }));
+                const prev = sel.value || 'ALL';
+                sel.innerHTML = '<option value="ALL">All Classes</option>' + classes.map((c) => `<option value="${esc(c)}">Class ${esc(c)}</option>`).join('');
+                sel.value = Array.from(sel.options).some((o) => o.value === prev) ? prev : 'ALL';
+
+                const pool = sel.value === 'ALL' ? students : students.filter((s) => String(s.class) === sel.value);
+                const hw = read('HOMEWORK');
+                const rows = pool.map((s) => {
+                    const assigned = hw.filter((h) => h.mode === 'ALL' || (h.mode === 'CLASS' && h.targetClass === s.class) || (h.mode === 'INDIVIDUAL' && h.targetStudentId === s.id));
+                    const done = assigned.filter((h) => h.completions && h.completions[s.id]).length;
+                    return { s, pts: Number(s.points) || 0, att: Number(this.calculateStudentAttendancePercentage(s.id)) || 0, done, total: assigned.length };
+                }).sort((a, b) => b.pts - a.pts || b.att - a.att || String(a.s.name).localeCompare(String(b.s.name)));
+
+                if (rows.length === 0) {
+                    body.innerHTML = '<tr><td colspan="6" class="p-6 text-center text-xs text-slate-400">No students to rank yet.</td></tr>';
+                    return;
+                }
+                const medal = (r) => r === 1 ? '🥇' : r === 2 ? '🥈' : r === 3 ? '🥉' : '';
+                body.innerHTML = rows.map((x) => {
+                    const rank = rows.filter((y) => y.pts > x.pts).length + 1;
+                    return `<tr class="border-b border-slate-100 hover:bg-slate-50">
+                        <td class="p-3 font-bold text-amber-600 whitespace-nowrap">${medal(rank)} #${rank}</td>
+                        <td class="p-3 font-semibold text-slate-800">${esc(x.s.name)}</td>
+                        <td class="p-3">Class ${esc(x.s.class)}</td>
+                        <td class="p-3 font-bold text-amber-600"><i class="fa-solid fa-star text-xs"></i> ${x.pts}</td>
+                        <td class="p-3">${x.att}%</td>
+                        <td class="p-3">${x.done} / ${x.total}</td>
+                    </tr>`;
+                }).join('');
+            };
+
+            const origSwitchTab = P.switchTeacherTab;
+            P.switchTeacherTab = function (tabName) {
+                origSwitchTab.call(this, tabName);
+                if (tabName === 'leaderboard') this.renderLeaderboardTab();
+            };
+
+            // ---------- 7. ANNOUNCEMENTS: EDIT / DELETE / CLEAR ----------
+            const DAY = 24 * 60 * 60 * 1000;
+
+            P.renderNoticesList = function () {
+                const container = document.getElementById('announcementList');
+                if (!container) return;
+                const notices = read('NOTICES');
+                if (notices.length === 0) {
+                    container.innerHTML = '<p class="text-xs text-slate-400">No announcements.</p>';
+                    return;
+                }
+                const bar = `<div class="flex flex-wrap gap-2 pb-2">
+                    <button type="button" onclick="app.clearNotices('old')" class="text-[11px] font-semibold text-amber-700 bg-amber-50 hover:bg-amber-100 border border-amber-200 px-2.5 py-1 rounded-lg">Delete older than 30 days</button>
+                    <button type="button" onclick="app.clearNotices('all')" class="text-[11px] font-semibold text-rose-700 bg-rose-50 hover:bg-rose-100 border border-rose-200 px-2.5 py-1 rounded-lg">Clear all</button>
+                </div>`;
+                container.innerHTML = bar + notices.map((n) => `
+                    <div class="p-3 bg-slate-50 border border-slate-200 rounded-xl text-xs space-y-1">
+                        <div class="flex justify-between items-center text-slate-500 font-medium">
+                            <span class="bg-emerald-100 text-emerald-800 px-2 py-0.5 rounded-md">Target: ${n.target === 'ALL' ? 'All Classes' : 'Class ' + esc(n.target)}</span>
+                            <span>${esc(n.date)}</span>
+                        </div>
+                        <p class="text-slate-800 font-medium">${esc(n.text)}</p>
+                        <div class="flex gap-3 pt-1">
+                            <button type="button" onclick="app.editNotice('${n.id}')" class="text-indigo-600 hover:text-indigo-800 font-semibold"><i class="fa-solid fa-pen-to-square"></i> Edit</button>
+                            <button type="button" onclick="app.deleteNotice('${n.id}')" class="text-rose-600 hover:text-rose-800 font-semibold"><i class="fa-solid fa-trash"></i> Delete</button>
+                        </div>
+                    </div>
+                `).join('');
+            };
+
+            P.editNotice = function (id) {
+                const notices = read('NOTICES');
+                const n = notices.find((x) => x.id === id);
+                if (!n) return;
+                const text = prompt('Edit announcement:', n.text);
+                if (text === null) return;
+                if (!text.trim()) { alert('The announcement cannot be empty. Use Delete to remove it.'); return; }
+                localStorage.setItem(DB_KEYS.NOTICES, JSON.stringify(notices.map((x) => x.id === id ? { ...x, text: text.trim() } : x)));
+                this.renderNoticesList();
+            };
+
+            P.deleteNotice = function (id) {
+                if (!confirm('Delete this announcement?')) return;
+                localStorage.setItem(DB_KEYS.NOTICES, JSON.stringify(read('NOTICES').filter((x) => x.id !== id)));
+                this.renderNoticesList();
+            };
+
+            P.clearNotices = function (mode) {
+                const notices = read('NOTICES');
+                const keep = mode === 'old' ? notices.filter((n) => Number(n.id) >= Date.now() - 30 * DAY) : [];
+                const removed = notices.length - keep.length;
+                if (removed === 0) { alert('Nothing to delete.'); return; }
+                if (!confirm('Delete ' + removed + ' announcement(s)? This cannot be undone.')) return;
+                localStorage.setItem(DB_KEYS.NOTICES, JSON.stringify(keep));
+                this.renderNoticesList();
+            };
+
+            // ---------- 7b. HOMEWORK: DELETE / CLEAR ----------
+            P.renderHomeworkTab = function () {
+                this.populateClassDropdowns();
+                const homeworkList = read('HOMEWORK');
+                const students = read('STUDENTS');
+                const container = document.getElementById('teacherHomeworkList');
+
+                if (homeworkList.length === 0) {
+                    container.innerHTML = `<p class="text-xs text-slate-400 py-4">No active homework assignments.</p>`;
+                    return;
+                }
+
+                const bar = `<div class="flex flex-wrap gap-2">
+                    <button type="button" onclick="app.clearHomework('expired')" class="text-[11px] font-semibold text-amber-700 bg-amber-50 hover:bg-amber-100 border border-amber-200 px-2.5 py-1 rounded-lg">Delete homework whose due date has passed</button>
+                    <button type="button" onclick="app.clearHomework('all')" class="text-[11px] font-semibold text-rose-700 bg-rose-50 hover:bg-rose-100 border border-rose-200 px-2.5 py-1 rounded-lg">Clear all homework</button>
+                </div>`;
+
+                container.innerHTML = bar + homeworkList.map((hw) => `
+                    <div class="p-4 border border-slate-200 rounded-2xl bg-slate-50 space-y-3">
+                        <div class="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-2">
+                            <div>
+                                <span class="text-xs font-bold bg-emerald-100 text-emerald-800 px-2.5 py-1 rounded-md">${esc(hw.subject)}</span>
+                                <span class="text-xs font-semibold bg-indigo-100 text-indigo-800 px-2.5 py-1 rounded-md ml-2">${esc(hw.targetDesc)}</span>
+                            </div>
+                            <div class="flex items-center gap-3">
+                                <span class="text-xs text-slate-500 font-medium"><i class="fa-regular fa-calendar-days mr-1"></i> Due: ${esc(hw.dueDate)}</span>
+                                <button type="button" onclick="app.deleteHomework('${hw.id}')" class="text-xs text-rose-600 hover:text-rose-800 font-semibold"><i class="fa-solid fa-trash"></i> Delete</button>
+                            </div>
+                        </div>
+                        <p class="text-sm font-medium text-slate-800">${esc(hw.details)}</p>
+
+                        <div class="pt-3 border-t border-slate-200">
+                            <h5 class="text-xs font-bold text-slate-700 mb-2">Mark Student Completion & Reward EduPoints:</h5>
+                            <div class="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-2">
+                                ${this.renderHomeworkStudentCheckboxes(hw, students)}
+                            </div>
+                        </div>
+                    </div>
+                `).join('');
+            };
+
+            P.deleteHomework = function (id) {
+                if (!confirm('Delete this homework? Students will no longer see it.')) return;
+                localStorage.setItem(DB_KEYS.HOMEWORK, JSON.stringify(read('HOMEWORK').filter((h) => h.id !== id)));
+                this.renderHomeworkTab();
+            };
+
+            P.clearHomework = function (mode) {
+                const list = read('HOMEWORK');
+                const today = new Date();
+                const todayKey = today.getFullYear() + '-' + String(today.getMonth() + 1).padStart(2, '0') + '-' + String(today.getDate()).padStart(2, '0');
+                const keep = mode === 'expired' ? list.filter((h) => !h.dueDate || h.dueDate >= todayKey) : [];
+                const removed = list.length - keep.length;
+                if (removed === 0) { alert('Nothing to delete.'); return; }
+                if (!confirm('Delete ' + removed + ' homework item(s)? This cannot be undone.')) return;
+                localStorage.setItem(DB_KEYS.HOMEWORK, JSON.stringify(keep));
+                this.renderHomeworkTab();
+            };
+
+            // ---------- NEW SCREEN PARTS (added automatically, no HTML editing needed) ----------
+            (function injectUi() {
+                const settingsBtn = document.getElementById('tabNav-settings');
+                if (settingsBtn && !document.getElementById('tabNav-leaderboard')) {
+                    settingsBtn.insertAdjacentHTML('beforebegin', `
+                <button onclick="app.switchTeacherTab('leaderboard')" id="tabNav-leaderboard" class="teacher-tab-btn px-4 py-2 rounded-xl font-semibold text-sm whitespace-nowrap bg-white text-slate-600 hover:bg-slate-100 border">
+                    <i class="fa-solid fa-trophy mr-1"></i> Leaderboard
+                </button>`);
+                }
+                const settingsTab = document.getElementById('teacherTab-settings');
+                if (settingsTab && !document.getElementById('teacherTab-leaderboard')) {
+                    settingsTab.insertAdjacentHTML('beforebegin', `
+            <div id="teacherTab-leaderboard" class="teacher-tab-content space-y-4 hidden">
+                <div class="bg-white p-6 rounded-2xl shadow-sm border border-slate-100 space-y-4">
+                    <div class="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3">
+                        <h3 class="font-bold text-slate-800 text-lg flex items-center gap-2"><i class="fa-solid fa-trophy text-amber-500"></i> Leaderboard</h3>
+                        <select id="lbClassFilter" onchange="app.renderLeaderboardTab()" class="px-3 py-2 text-sm rounded-xl border border-slate-300"><option value="ALL">All Classes</option></select>
+                    </div>
+                    <p class="text-xs text-slate-500">Ranked by EduPoints. Students with the same EduPoints share the same rank.</p>
+                    <div class="overflow-x-auto">
+                        <table class="w-full text-left text-sm">
+                            <thead class="bg-slate-50 text-slate-600 font-semibold border-b border-slate-200">
+                                <tr><th class="p-3">Rank</th><th class="p-3">Student</th><th class="p-3">Class</th><th class="p-3">EduPoints</th><th class="p-3">Attendance</th><th class="p-3">Homework done</th></tr>
+                            </thead>
+                            <tbody id="leaderboardBody"></tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>`);
+                }
+                const portal = document.getElementById('studentPortal');
+                if (portal && !document.getElementById('siblingSwitcher')) {
+                    portal.insertAdjacentHTML('afterbegin', '<div id="siblingSwitcher" class="hidden bg-white border border-emerald-200 rounded-2xl p-4 shadow-sm"></div>');
+                }
+                const feeStatusBox = document.getElementById('modalStudentFeeStatus');
+                if (feeStatusBox && !document.getElementById('modalStudentDueDay')) {
+                    feeStatusBox.parentElement.insertAdjacentHTML('afterend', `
+                <div>
+                    <label class="block text-xs font-semibold text-slate-600 mb-1">Fee Due Day of every month (1-28, usually the admission day)</label>
+                    <input type="number" id="modalStudentDueDay" min="1" max="28" value="1" class="w-full px-3 py-2 text-sm rounded-xl border border-slate-300" required>
+                    <p class="text-[11px] text-slate-400 mt-1">The month's fee counts as "due" only from this day. Before it, it shows as "not due yet".</p>
+                </div>
+                <div>
+                    <label class="block text-xs font-semibold text-slate-600 mb-1">Link as brother/sister of (optional - shares one login)</label>
+                    <select id="modalSiblingPick" onchange="app.onSiblingPick(this.value)" class="w-full px-3 py-2 text-sm rounded-xl border border-slate-300"></select>
+                    <p id="modalSiblingNote" class="text-[11px] text-indigo-600 font-semibold mt-1"></p>
+                    <p class="text-[11px] text-slate-400 mt-1">Choosing a student copies their mobile number, password and parent details here. Both children then log in with the same mobile + password and switch between profiles.</p>
+                </div>`);
+                }
+            })();
+        })();
+
+              (function () {
+            const P = TuitionApp.prototype;
+            const KEY_SESSION = 'sharma_edu_session';
+            const IDLE_MS = 20 * 60 * 1000;
+            const read = (k) => JSON.parse(localStorage.getItem(DB_KEYS[k]));
+
+            // ---------- 1. STAY LOGGED IN ON REFRESH ----------
+            // The login is kept only for this browser tab (closing the tab/browser still logs out)
+            // and expires after 20 minutes without any click or key press.
+            P.saveSession = function (data) {
+                try { sessionStorage.setItem(KEY_SESSION, JSON.stringify({ ...data, ts: Date.now() })); } catch (e) { /* ignore */ }
+                if (!this._sessionTouchOn) {
+                    this._sessionTouchOn = true;
+                    const touch = () => {
+                        try {
+                            const raw = sessionStorage.getItem(KEY_SESSION);
+                            if (!raw) return;
+                            const s = JSON.parse(raw);
+                            s.ts = Date.now();
+                            sessionStorage.setItem(KEY_SESSION, JSON.stringify(s));
+                        } catch (e) { /* ignore */ }
+                    };
+                    ['click', 'keydown', 'touchstart'].forEach((ev) => document.addEventListener(ev, touch, true));
+                }
+            };
+
+            P.clearSession = function () {
+                try { sessionStorage.removeItem(KEY_SESSION); } catch (e) { /* ignore */ }
+            };
+
+            P.openStudentPortalFor = function (st) {
+                this.currentUserRole = 'student';
+                this.currentStudent = st;
+                document.getElementById('loginSection').classList.add('hidden');
+                document.getElementById('studentPortal').classList.remove('hidden');
+                document.getElementById('userInfoHeader').classList.remove('hidden');
+                document.getElementById('userBadge').innerText = `Student: ${st.name}`;
+                this.renderStudentPortal();
+                this.startIdleTimer();
+            };
+
+            P.restoreSession = function () {
+                if (this._sessionRestored || this.currentUserRole) return;
+                this._sessionRestored = true;
+                let s = null;
+                try { s = JSON.parse(sessionStorage.getItem(KEY_SESSION) || 'null'); } catch (e) { /* ignore */ }
+                if (!s || !s.role || Date.now() - (s.ts || 0) > IDLE_MS) { this.clearSession(); return; }
+                if (s.role === 'teacher') {
+                    this.completeTeacherLogin();
+                } else if (s.role === 'student') {
+                    const st = read('STUDENTS').find((x) => x.id === s.studentId);
+                    if (!st) { this.clearSession(); return; }
+                    this.openStudentPortalFor(st);
+                }
+            };
+
+            const origHint = P.refreshTeacherPinHint;
+            P.refreshTeacherPinHint = function () {
+                origHint.call(this);
+                if (!this._sessionRestored) setTimeout(() => this.restoreSession(), 0);
+            };
+
+            const origTeacherLogin = P.completeTeacherLogin;
+            P.completeTeacherLogin = function () {
+                origTeacherLogin.call(this);
+                this.saveSession({ role: 'teacher' });
+            };
+
+            const origLogout = P.logout;
+            P.logout = function () {
+                this.clearSession();
+                origLogout.call(this);
+                const sw = document.getElementById('siblingSwitcher');
+                if (sw) { sw.classList.add('hidden'); sw.innerHTML = ''; }
+            };
+
+            // ---------- 2. RANK FOLLOWS EDUPOINTS ----------
+            // Same EduPoints = same rank (for example 100, 100, 90 -> #1, #1, #3)
+            P.getRank = function (st, scope) {
+                const all = read('STUDENTS');
+                const pool = scope === 'class' ? all.filter((x) => x.class === st.class) : all;
+                const pts = Number(st.points) || 0;
+                return pool.filter((x) => (Number(x.points) || 0) > pts).length + 1;
+            };
+
+            const origDash = P.renderStudentDashboardTab;
+            P.renderStudentDashboardTab = function () {
+                origDash.call(this);
+                const s = this.currentStudent;
+                if (!s) return;
+                document.getElementById('spClassRank').innerText = '#' + this.getRank(s, 'class');
+                const pts = document.getElementById('spPoints');
+                if (pts) pts.innerText = `${s.points || 0} Points`;
+            };
+
+            // ---------- 3. FEE DUE DAY (different admission dates) ----------
+            // A student's month becomes "due" on their own due day (for example the 15th).
+            // Before that day the current month is shown as "not due yet" and is not counted in the dues.
+            P.ordinal = function (n) {
+                const s = ['th', 'st', 'nd', 'rd'];
+                const v = n % 100;
+                return n + (s[(v - 20) % 10] || s[v] || s[0]);
+            };
+
+            P.dueDayOf = function (st) {
+                return Math.min(28, Math.max(1, parseInt(st.dueDay, 10) || 1));
+            };
+
+            P.isMonthDueNow = function (st, key) {
+                const cur = this.currentMonthKey();
+                if (key < cur) return true;
+                if (key > cur) return false;
+                return new Date().getDate() >= this.dueDayOf(st);
+            };
+
+            P.getDueMonths = function (student, ledger) {
+                ledger = ledger || this.getLedger();
+                const cur = this.currentMonthKey();
+                const start = student.joinMonth || cur;
+                if (start > cur) return [];
+                const paid = ledger[student.id] || {};
+                return this.monthsBetween(start, cur).filter((k) => !paid[k] && this.isMonthDueNow(student, k));
+            };
+
+            P.renderStudentMonths = function () {
+                const s = this.currentStudent;
+                const cur = this.currentMonthKey();
+                const start = s.joinMonth || cur;
+                const fee = Number(s.feeAmount) || 0;
+                const paid = this.getLedger()[s.id] || {};
+                const waiting = new Set();
+                JSON.parse(localStorage.getItem(DB_KEYS.PROOFS))
+                    .filter((p) => p.studentId === s.id && p.status === 'Pending')
+                    .forEach((p) => ((p.months && p.months.length) ? p.months : [cur]).forEach((k) => waiting.add(k)));
+
+                const keys = start > cur ? [] : this.monthsBetween(start, cur);
+                const box = document.getElementById('spMonthsList');
+                if (keys.length === 0) {
+                    box.innerHTML = '<p class="text-xs text-slate-400">No fee months yet.</p>';
+                    return;
+                }
+                box.innerHTML = keys.map((k) => {
+                    const label = this.monthLabel(k);
+                    if (paid[k]) {
+                        return `<div class="flex justify-between items-center p-2.5 bg-green-50 border border-green-200 rounded-xl text-xs"><span class="font-semibold text-slate-800">${label}</span><span class="font-bold text-green-700">Paid</span></div>`;
+                    }
+                    if (waiting.has(k)) {
+                        return `<div class="flex justify-between items-center p-2.5 bg-amber-50 border border-amber-200 rounded-xl text-xs"><span class="font-semibold text-slate-800">${label}</span><span class="font-bold text-amber-700">Awaiting teacher approval</span></div>`;
+                    }
+                    if (!this.isMonthDueNow(s, k)) {
+                        const mon = new Date(Number(k.split('-')[0]), Number(k.split('-')[1]) - 1, 1).toLocaleString('default', { month: 'short' });
+                        return `<label class="flex justify-between items-center p-2.5 bg-slate-50 border border-slate-200 rounded-xl text-xs cursor-pointer"><span class="font-semibold text-slate-800"><input type="checkbox" class="pay-month-cb accent-emerald-600 mr-2" value="${k}" onchange="app.updateSelectedMonths()">${label}</span><span class="font-bold text-slate-500">Not due yet (due ${this.dueDayOf(s)} ${mon}) - ₹${fee}</span></label>`;
+                    }
+                    return `<label class="flex justify-between items-center p-2.5 bg-rose-50 border border-rose-200 rounded-xl text-xs cursor-pointer"><span class="font-semibold text-slate-800"><input type="checkbox" class="pay-month-cb accent-emerald-600 mr-2" value="${k}" checked onchange="app.updateSelectedMonths()">${label}</span><span class="font-bold text-rose-600">Due ₹${fee}</span></label>`;
+                }).join('');
+            };
+
+            const origFees = P.renderStudentFeesTab;
+            P.renderStudentFeesTab = function () {
+                origFees.call(this);
+                const s = this.currentStudent;
+                if (!s) return;
+                document.getElementById('spFeeAmount').innerHTML = `₹${esc(s.feeAmount)}<span class="block text-xs font-medium text-slate-500">Due on the ${this.ordinal(this.dueDayOf(s))} of every month</span>`;
+            };
+
+            // ---------- 4. "+" BUTTON FOR EDUPOINTS ----------
+            P.addStudentPoints = function (id) {
+                const v = prompt('How many EduPoints do you want to ADD?', '10');
+                if (v === null) return;
+                const n = parseInt(v, 10);
+                if (isNaN(n) || n <= 0) { alert('Please enter a number greater than 0.'); return; }
+                const students = read('STUDENTS').map((s) => s.id === id ? { ...s, points: (Number(s.points) || 0) + n } : s);
+                localStorage.setItem(DB_KEYS.STUDENTS, JSON.stringify(students));
+                this.renderStudentsTable();
+            };
+
+            // ---------- 5. BROTHERS / SISTERS: ONE LOGIN, SWITCH PROFILES ----------
+            // Students with the same mobile number AND the same password are treated as one family.
+            P.getSiblings = function (st) {
+                st = st || this.currentStudent;
+                if (!st) return [];
+                return read('STUDENTS').filter((x) => x.mobile === st.mobile && x.password === st.password);
+            };
+
+            P.renderSiblingSwitcher = function () {
+                const box = document.getElementById('siblingSwitcher');
+                if (!box || !this.currentStudent) return;
+                const sibs = this.getSiblings(this.currentStudent);
+                if (sibs.length < 2) { box.classList.add('hidden'); box.innerHTML = ''; return; }
+                box.classList.remove('hidden');
+                box.innerHTML = `<p class="text-xs font-semibold text-slate-500 mb-2"><i class="fa-solid fa-users mr-1"></i> Your children - tap a name to switch profile</p>
+                    <div class="flex flex-wrap gap-2">${sibs.map((x) => `
+                        <button type="button" onclick="app.switchSibling('${x.id}')" class="px-4 py-2 rounded-xl text-sm font-semibold border ${x.id === this.currentStudent.id ? 'bg-emerald-600 text-white border-emerald-600 shadow' : 'bg-white text-slate-700 border-slate-300 hover:bg-emerald-50'}">
+                            ${esc(x.name)} <span class="text-xs font-normal opacity-80">(Class ${esc(x.class)})</span>
+                        </button>`).join('')}</div>`;
+            };
+
+            P.switchSibling = function (id) {
+                const st = this.getSiblings(this.currentStudent).find((x) => x.id === id);
+                if (!st) return;
+                this.currentStudent = st;
+                this.tempProofPhotoBase64 = null;
+                this.tempDoubtPhotoBase64 = null;
+                ['proofPhotoPreviewContainer', 'doubtPhotoPreviewContainer'].forEach((i) => { const el = document.getElementById(i); if (el) el.classList.add('hidden'); });
+                document.getElementById('userBadge').innerText = `Student: ${st.name}`;
+                this.renderStudentPortal();
+            };
+
+            const origPortal = P.renderStudentPortal;
+            P.renderStudentPortal = function () {
+                origPortal.call(this);
+                this.renderSiblingSwitcher();
+                this.saveSession({ role: 'student', studentId: this.currentStudent.id });
+            };
+
+            // dropdown inside the Add / Edit student form
+            P.fillSiblingPicker = function (excludeId) {
+                const pick = document.getElementById('modalSiblingPick');
+                if (!pick) return;
+                pick.innerHTML = '<option value="">- Not a sibling (separate login) -</option>' +
+                    read('STUDENTS').filter((s) => s.id !== excludeId).map((s) => `<option value="${esc(s.id)}">${esc(s.name)} (Class ${esc(s.class)}, ${esc(s.mobile)})</option>`).join('');
+                const note = document.getElementById('modalSiblingNote');
+                if (note) {
+                    const me = excludeId ? read('STUDENTS').find((s) => s.id === excludeId) : null;
+                    const linked = me ? this.getSiblings(me).filter((s) => s.id !== me.id) : [];
+                    note.innerText = linked.length ? 'Linked with: ' + linked.map((s) => s.name).join(', ') : '';
+                }
+            };
+
+            P.onSiblingPick = function (id) {
+                if (!id) return;
+                const s = read('STUDENTS').find((x) => x.id === id);
+                if (!s) return;
+                document.getElementById('modalStudentMobile').value = s.mobile;
+                document.getElementById('modalStudentPassword').value = s.password;
+                document.getElementById('modalParentName').value = s.parentName || '';
+                document.getElementById('modalMotherName').value = s.motherName || '';
+                document.getElementById('modalParentMobile').value = s.parentMobile || '';
+            };
+
+            const origAdd = P.openAddStudentModal;
+            P.openAddStudentModal = function () {
+                origAdd.call(this);
+                document.getElementById('modalStudentDueDay').value = Math.min(28, new Date().getDate());
+                this.fillSiblingPicker('');
+            };
+
+            const origEdit = P.openEditStudentModal;
+            P.openEditStudentModal = function (id) {
+                origEdit.call(this, id);
+                const s = read('STUDENTS').find((x) => x.id === id);
+                document.getElementById('modalStudentDueDay').value = s ? (s.dueDay || 1) : 1;
+                this.fillSiblingPicker(id);
+            };
+
+            P.saveStudent = function (e) {
+                e.preventDefault();
+                const id = document.getElementById('studentEditId').value;
+                const name = document.getElementById('modalStudentName').value.trim();
+                const cls = document.getElementById('modalStudentClass').value.trim().replace(/^class\s*/i, '');
+                const mobile = document.getElementById('modalStudentMobile').value.trim();
+                const feeAmount = Number(document.getElementById('modalStudentFee').value);
+                const feeStatus = document.getElementById('modalStudentFeeStatus').value;
+                const password = document.getElementById('modalStudentPassword').value.trim();
+                const parentName = document.getElementById('modalParentName').value.trim();
+                const motherName = document.getElementById('modalMotherName').value.trim();
+                const parentMobile = document.getElementById('modalParentMobile').value.trim();
+                const dueDay = parseInt(document.getElementById('modalStudentDueDay').value, 10);
+                const cur = this.currentMonthKey();
+                let joinMonth = document.getElementById('modalStudentJoinMonth').value || cur;
+                if (joinMonth > cur) joinMonth = cur;
+
+                if (!name) { alert('Please enter the student name.'); return; }
+                if (!/^[A-Za-z0-9][A-Za-z0-9 \-]{0,9}$/.test(cls)) { alert('Class can contain only letters, numbers, space or hyphen (maximum 10 characters).'); return; }
+                if (!/^\d{10}$/.test(mobile)) { alert('Registered mobile number must be exactly 10 digits.'); return; }
+                if (parentMobile && !/^\d{10}$/.test(parentMobile)) { alert('Parent alternate mobile number must be exactly 10 digits.'); return; }
+                if (!(feeAmount > 0)) { alert('Please enter a valid monthly fee.'); return; }
+                if (!(dueDay >= 1 && dueDay <= 28)) { alert('Fee due day must be a number from 1 to 28.'); return; }
+                if (password.length < 4) { alert('Portal password must be at least 4 characters.'); return; }
+
+                let students = JSON.parse(localStorage.getItem(DB_KEYS.STUDENTS));
+
+                // If this student already shares a login with brothers/sisters, offer to change the whole family together
+                if (id) {
+                    const before = students.find((st) => st.id === id);
+                    if (before && (before.mobile !== mobile || before.password !== password)) {
+                        const group = students.filter((st) => st.id !== id && st.mobile === before.mobile && st.password === before.password);
+                        if (group.length && confirm(name + ' shares this login with ' + group.map((g) => g.name).join(', ') + '.\n\nOK = change the mobile/password of ALL of them (they stay linked).\nCancel = change only ' + name + ' (unlink).')) {
+                            students = students.map((st) => group.some((g) => g.id === st.id) ? { ...st, mobile, password } : st);
+                        }
+                    }
+                }
+
+                // The same mobile number is allowed only for brothers/sisters, who must then share the same password
+                const clash = students.find((st) => st.mobile === mobile && st.id !== id && st.password !== password);
+                if (clash) {
+                    alert('This mobile number is already used by ' + clash.name + ' with a different password.\n\nBrothers/sisters must have the SAME mobile number AND the SAME password. Use the "Link as brother/sister of" list in this form, or use a different mobile number.');
+                    return;
+                }
+
+                let savedStudent = null;
+
+                if (id) {
+                    students = students.map((st) => {
+                        if (st.id !== id) return st;
+                        savedStudent = { ...st, name, class: cls, mobile, feeAmount, password, parentName, motherName, parentMobile, joinMonth, dueDay };
+                        return savedStudent;
+                    });
+                } else {
+                    savedStudent = {
+                        id: Date.now().toString(),
+                        name,
+                        class: cls,
+                        mobile,
+                        feeAmount,
+                        feeStatus: 'Unpaid',
+                        password,
+                        parentName,
+                        motherName,
+                        parentMobile,
+                        joinMonth,
+                        dueDay,
+                        points: 100
+                    };
+                    students.push(savedStudent);
+                }
+
+                localStorage.setItem(DB_KEYS.STUDENTS, JSON.stringify(students));
+
+                // "Current Month Fee Status" in this form is applied to the current month in the fee ledger
+                const entry = (this.getLedger()[savedStudent.id] || {})[cur];
+                if (feeStatus === 'Paid' && !entry) {
+                    this.recordManualPayment(savedStudent, [cur]);
+                } else if (feeStatus === 'Unpaid' && entry) {
+                    if (entry.mode === 'Online') {
+                        alert('This month was paid online and approved with a receipt, so it cannot be changed to Unpaid here.');
+                    } else {
+                        this.undoMonth(savedStudent.id, cur);
+                    }
+                }
+                this.syncFeeStatuses();
+
+                this.closeStudentModal();
+                this.renderStudentsTable();
+                this.renderOverviewTab();
+            };
+
+            // Students table: sibling tag, "not due yet" status, "+" button and ranks
+            P.renderStudentsTable = function () {
+                const students = JSON.parse(localStorage.getItem(DB_KEYS.STUDENTS));
+                const ledger = this.getLedger();
+                const search = (document.getElementById('studentSearch')?.value || '').toLowerCase();
+                const tbody = document.getElementById('studentsTableBody');
+                const cur = this.currentMonthKey();
+
+                const filtered = students.filter((s) => s.name.toLowerCase().includes(search) || String(s.class).toLowerCase().includes(search));
+
+                tbody.innerHTML = filtered.map((s) => {
+                    const dueMonths = this.getDueMonths(s, ledger);
+                    const dueTotal = dueMonths.length * (Number(s.feeAmount) || 0);
+                    const dueHtml = dueMonths.length > 0
+                        ? `<span class="px-2.5 py-1 rounded-full text-xs font-bold bg-rose-100 text-rose-700" title="${esc(dueMonths.map((k) => this.monthLabel(k)).join(', '))}">${dueMonths.length} month${dueMonths.length > 1 ? 's' : ''} · ₹${dueTotal}</span>`
+                        : `<span class="px-2.5 py-1 rounded-full text-xs font-bold bg-green-100 text-green-700">No dues</span>`;
+                    const notDueYet = s.feeStatus !== 'Paid' && (s.joinMonth || cur) <= cur && !this.isMonthDueNow(s, cur);
+                    const statusHtml = s.feeStatus === 'Paid'
+                        ? `<span class="px-2.5 py-1 rounded-full text-xs font-bold bg-green-100 text-green-700">Paid</span>`
+                        : (notDueYet
+                            ? `<span class="px-2.5 py-1 rounded-full text-xs font-bold bg-amber-100 text-amber-700">Due on ${this.ordinal(this.dueDayOf(s))}</span>`
+                            : `<span class="px-2.5 py-1 rounded-full text-xs font-bold bg-rose-100 text-rose-700">Unpaid</span>`);
+                    const isSibling = students.filter((x) => x.mobile === s.mobile && x.password === s.password).length > 1;
+                    return `
+                    <tr class="hover:bg-slate-50 border-b border-slate-100">
+                        <td class="p-4 font-semibold text-slate-800">${esc(s.name)}${isSibling ? ' <span class="ml-1 text-[10px] font-bold bg-indigo-100 text-indigo-700 px-1.5 py-0.5 rounded-md" title="Shares one login with a brother/sister">Sibling</span>' : ''}</td>
+                        <td class="p-4">Class ${esc(s.class)}</td>
+                        <td class="p-4">${esc(s.mobile)}</td>
+                        <td class="p-4 font-medium">₹${s.feeAmount}</td>
+                        <td class="p-4">${statusHtml}</td>
+                        <td class="p-4">${dueHtml}</td>
+                        <td class="p-4">
+                            <div class="flex items-center gap-1 text-amber-600 font-bold">
+                                <i class="fa-solid fa-star text-xs"></i>
+                                <input type="number" min="0" value="${Number(s.points) || 0}" onchange="app.updateStudentPoints('${s.id}', this.value)" class="w-20 px-2 py-1 text-sm font-bold text-amber-600 rounded-lg border border-slate-300 focus:ring-2 focus:ring-amber-400 focus:outline-none">
+                                <button type="button" onclick="app.addStudentPoints('${s.id}')" title="Add EduPoints" class="w-7 h-7 rounded-lg bg-amber-100 hover:bg-amber-200 text-amber-700 font-bold text-base leading-none">+</button>
+                            </div>
+                            <p class="text-[10px] text-slate-500 font-semibold mt-1">Class rank #${this.getRank(s, 'class')} · Overall #${this.getRank(s, 'all')}</p>
+                        </td>
+                        <td class="p-4 text-right space-x-2 whitespace-nowrap">
+                            <button onclick="app.openFeesModal('${s.id}')" class="text-emerald-700 hover:text-emerald-900 font-medium text-xs bg-emerald-50 hover:bg-emerald-100 px-2.5 py-1.5 rounded-lg border border-emerald-200 transition">
+                                <i class="fa-solid fa-indian-rupee-sign"></i> Fees
+                            </button>
+                            <button onclick="app.openEditStudentModal('${s.id}')" class="text-indigo-600 hover:text-indigo-800 font-medium text-xs bg-indigo-50 hover:bg-indigo-100 px-2.5 py-1.5 rounded-lg border border-indigo-200 transition">
+                                <i class="fa-solid fa-pen-to-square"></i> Edit
+                            </button>
+                            <button onclick="app.deleteStudent('${s.id}')" class="text-rose-600 hover:text-rose-800 font-medium text-xs bg-rose-50 hover:bg-rose-100 px-2.5 py-1.5 rounded-lg border border-rose-200 transition">
+                                <i class="fa-solid fa-user-minus"></i> Leave
+                            </button>
+                        </td>
+                    </tr>`;
+                }).join('');
+            };
+
+            // ---------- 6. LEADERBOARD (teacher) ----------
+            P.renderLeaderboardTab = function () {
+                const sel = document.getElementById('lbClassFilter');
+                const body = document.getElementById('leaderboardBody');
+                if (!sel || !body) return;
+                const students = read('STUDENTS');
+                const classes = Array.from(new Set(students.map((s) => s.class))).sort((a, b) => String(a).localeCompare(String(b), undefined, { numeric: true }));
+                const prev = sel.value || 'ALL';
+                sel.innerHTML = '<option value="ALL">All Classes</option>' + classes.map((c) => `<option value="${esc(c)}">Class ${esc(c)}</option>`).join('');
+                sel.value = Array.from(sel.options).some((o) => o.value === prev) ? prev : 'ALL';
+
+                const pool = sel.value === 'ALL' ? students : students.filter((s) => String(s.class) === sel.value);
+                const hw = read('HOMEWORK');
+                const rows = pool.map((s) => {
+                    const assigned = hw.filter((h) => h.mode === 'ALL' || (h.mode === 'CLASS' && h.targetClass === s.class) || (h.mode === 'INDIVIDUAL' && h.targetStudentId === s.id));
+                    const done = assigned.filter((h) => h.completions && h.completions[s.id]).length;
+                    return { s, pts: Number(s.points) || 0, att: Number(this.calculateStudentAttendancePercentage(s.id)) || 0, done, total: assigned.length };
+                }).sort((a, b) => b.pts - a.pts || b.att - a.att || String(a.s.name).localeCompare(String(b.s.name)));
+
+                if (rows.length === 0) {
+                    body.innerHTML = '<tr><td colspan="6" class="p-6 text-center text-xs text-slate-400">No students to rank yet.</td></tr>';
+                    return;
+                }
+                const medal = (r) => r === 1 ? '🥇' : r === 2 ? '🥈' : r === 3 ? '🥉' : '';
+                body.innerHTML = rows.map((x) => {
+                    const rank = rows.filter((y) => y.pts > x.pts).length + 1;
+                    return `<tr class="border-b border-slate-100 hover:bg-slate-50">
+                        <td class="p-3 font-bold text-amber-600 whitespace-nowrap">${medal(rank)} #${rank}</td>
+                        <td class="p-3 font-semibold text-slate-800">${esc(x.s.name)}</td>
+                        <td class="p-3">Class ${esc(x.s.class)}</td>
+                        <td class="p-3 font-bold text-amber-600"><i class="fa-solid fa-star text-xs"></i> ${x.pts}</td>
+                        <td class="p-3">${x.att}%</td>
+                        <td class="p-3">${x.done} / ${x.total}</td>
+                    </tr>`;
+                }).join('');
+            };
+
+            const origSwitchTab = P.switchTeacherTab;
+            P.switchTeacherTab = function (tabName) {
+                origSwitchTab.call(this, tabName);
+                if (tabName === 'leaderboard') this.renderLeaderboardTab();
+            };
+
+            // ---------- 7. ANNOUNCEMENTS: EDIT / DELETE / CLEAR ----------
+            const DAY = 24 * 60 * 60 * 1000;
+
+            P.renderNoticesList = function () {
+                const container = document.getElementById('announcementList');
+                if (!container) return;
+                const notices = read('NOTICES');
+                if (notices.length === 0) {
+                    container.innerHTML = '<p class="text-xs text-slate-400">No announcements.</p>';
+                    return;
+                }
+                const bar = `<div class="flex flex-wrap gap-2 pb-2">
+                    <button type="button" onclick="app.clearNotices('old')" class="text-[11px] font-semibold text-amber-700 bg-amber-50 hover:bg-amber-100 border border-amber-200 px-2.5 py-1 rounded-lg">Delete older than 30 days</button>
+                    <button type="button" onclick="app.clearNotices('all')" class="text-[11px] font-semibold text-rose-700 bg-rose-50 hover:bg-rose-100 border border-rose-200 px-2.5 py-1 rounded-lg">Clear all</button>
+                </div>`;
+                container.innerHTML = bar + notices.map((n) => `
+                    <div class="p-3 bg-slate-50 border border-slate-200 rounded-xl text-xs space-y-1">
+                        <div class="flex justify-between items-center text-slate-500 font-medium">
+                            <span class="bg-emerald-100 text-emerald-800 px-2 py-0.5 rounded-md">Target: ${n.target === 'ALL' ? 'All Classes' : 'Class ' + esc(n.target)}</span>
+                            <span>${esc(n.date)}</span>
+                        </div>
+                        <p class="text-slate-800 font-medium">${esc(n.text)}</p>
+                        <div class="flex gap-3 pt-1">
+                            <button type="button" onclick="app.editNotice('${n.id}')" class="text-indigo-600 hover:text-indigo-800 font-semibold"><i class="fa-solid fa-pen-to-square"></i> Edit</button>
+                            <button type="button" onclick="app.deleteNotice('${n.id}')" class="text-rose-600 hover:text-rose-800 font-semibold"><i class="fa-solid fa-trash"></i> Delete</button>
+                        </div>
+                    </div>
+                `).join('');
+            };
+
+            P.editNotice = function (id) {
+                const notices = read('NOTICES');
+                const n = notices.find((x) => x.id === id);
+                if (!n) return;
+                const text = prompt('Edit announcement:', n.text);
+                if (text === null) return;
+                if (!text.trim()) { alert('The announcement cannot be empty. Use Delete to remove it.'); return; }
+                localStorage.setItem(DB_KEYS.NOTICES, JSON.stringify(notices.map((x) => x.id === id ? { ...x, text: text.trim() } : x)));
+                this.renderNoticesList();
+            };
+
+            P.deleteNotice = function (id) {
+                if (!confirm('Delete this announcement?')) return;
+                localStorage.setItem(DB_KEYS.NOTICES, JSON.stringify(read('NOTICES').filter((x) => x.id !== id)));
+                this.renderNoticesList();
+            };
+
+            P.clearNotices = function (mode) {
+                const notices = read('NOTICES');
+                const keep = mode === 'old' ? notices.filter((n) => Number(n.id) >= Date.now() - 30 * DAY) : [];
+                const removed = notices.length - keep.length;
+                if (removed === 0) { alert('Nothing to delete.'); return; }
+                if (!confirm('Delete ' + removed + ' announcement(s)? This cannot be undone.')) return;
+                localStorage.setItem(DB_KEYS.NOTICES, JSON.stringify(keep));
+                this.renderNoticesList();
+            };
+
+            // ---------- 7b. HOMEWORK: DELETE / CLEAR ----------
+            P.renderHomeworkTab = function () {
+                this.populateClassDropdowns();
+                const homeworkList = read('HOMEWORK');
+                const students = read('STUDENTS');
+                const container = document.getElementById('teacherHomeworkList');
+
+                if (homeworkList.length === 0) {
+                    container.innerHTML = `<p class="text-xs text-slate-400 py-4">No active homework assignments.</p>`;
+                    return;
+                }
+
+                const bar = `<div class="flex flex-wrap gap-2">
+                    <button type="button" onclick="app.clearHomework('expired')" class="text-[11px] font-semibold text-amber-700 bg-amber-50 hover:bg-amber-100 border border-amber-200 px-2.5 py-1 rounded-lg">Delete homework whose due date has passed</button>
+                    <button type="button" onclick="app.clearHomework('all')" class="text-[11px] font-semibold text-rose-700 bg-rose-50 hover:bg-rose-100 border border-rose-200 px-2.5 py-1 rounded-lg">Clear all homework</button>
+                </div>`;
+
+                container.innerHTML = bar + homeworkList.map((hw) => `
+                    <div class="p-4 border border-slate-200 rounded-2xl bg-slate-50 space-y-3">
+                        <div class="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-2">
+                            <div>
+                                <span class="text-xs font-bold bg-emerald-100 text-emerald-800 px-2.5 py-1 rounded-md">${esc(hw.subject)}</span>
+                                <span class="text-xs font-semibold bg-indigo-100 text-indigo-800 px-2.5 py-1 rounded-md ml-2">${esc(hw.targetDesc)}</span>
+                            </div>
+                            <div class="flex items-center gap-3">
+                                <span class="text-xs text-slate-500 font-medium"><i class="fa-regular fa-calendar-days mr-1"></i> Due: ${esc(hw.dueDate)}</span>
+                                <button type="button" onclick="app.deleteHomework('${hw.id}')" class="text-xs text-rose-600 hover:text-rose-800 font-semibold"><i class="fa-solid fa-trash"></i> Delete</button>
+                            </div>
+                        </div>
+                        <p class="text-sm font-medium text-slate-800">${esc(hw.details)}</p>
+
+                        <div class="pt-3 border-t border-slate-200">
+                            <h5 class="text-xs font-bold text-slate-700 mb-2">Mark Student Completion & Reward EduPoints:</h5>
+                            <div class="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-2">
+                                ${this.renderHomeworkStudentCheckboxes(hw, students)}
+                            </div>
+                        </div>
+                    </div>
+                `).join('');
+            };
+
+            P.deleteHomework = function (id) {
+                if (!confirm('Delete this homework? Students will no longer see it.')) return;
+                localStorage.setItem(DB_KEYS.HOMEWORK, JSON.stringify(read('HOMEWORK').filter((h) => h.id !== id)));
+                this.renderHomeworkTab();
+            };
+
+            P.clearHomework = function (mode) {
+                const list = read('HOMEWORK');
+                const today = new Date();
+                const todayKey = today.getFullYear() + '-' + String(today.getMonth() + 1).padStart(2, '0') + '-' + String(today.getDate()).padStart(2, '0');
+                const keep = mode === 'expired' ? list.filter((h) => !h.dueDate || h.dueDate >= todayKey) : [];
+                const removed = list.length - keep.length;
+                if (removed === 0) { alert('Nothing to delete.'); return; }
+                if (!confirm('Delete ' + removed + ' homework item(s)? This cannot be undone.')) return;
+                localStorage.setItem(DB_KEYS.HOMEWORK, JSON.stringify(keep));
+                this.renderHomeworkTab();
+            };
+
+            // ---------- NEW SCREEN PARTS (added automatically, no HTML editing needed) ----------
+            (function injectUi() {
+                const settingsBtn = document.getElementById('tabNav-settings');
+                if (settingsBtn && !document.getElementById('tabNav-leaderboard')) {
+                    settingsBtn.insertAdjacentHTML('beforebegin', `
+                <button onclick="app.switchTeacherTab('leaderboard')" id="tabNav-leaderboard" class="teacher-tab-btn px-4 py-2 rounded-xl font-semibold text-sm whitespace-nowrap bg-white text-slate-600 hover:bg-slate-100 border">
+                    <i class="fa-solid fa-trophy mr-1"></i> Leaderboard
+                </button>`);
+                }
+                const settingsTab = document.getElementById('teacherTab-settings');
+                if (settingsTab && !document.getElementById('teacherTab-leaderboard')) {
+                    settingsTab.insertAdjacentHTML('beforebegin', `
+            <div id="teacherTab-leaderboard" class="teacher-tab-content space-y-4 hidden">
+                <div class="bg-white p-6 rounded-2xl shadow-sm border border-slate-100 space-y-4">
+                    <div class="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3">
+                        <h3 class="font-bold text-slate-800 text-lg flex items-center gap-2"><i class="fa-solid fa-trophy text-amber-500"></i> Leaderboard</h3>
+                        <select id="lbClassFilter" onchange="app.renderLeaderboardTab()" class="px-3 py-2 text-sm rounded-xl border border-slate-300"><option value="ALL">All Classes</option></select>
+                    </div>
+                    <p class="text-xs text-slate-500">Ranked by EduPoints. Students with the same EduPoints share the same rank.</p>
+                    <div class="overflow-x-auto">
+                        <table class="w-full text-left text-sm">
+                            <thead class="bg-slate-50 text-slate-600 font-semibold border-b border-slate-200">
+                                <tr><th class="p-3">Rank</th><th class="p-3">Student</th><th class="p-3">Class</th><th class="p-3">EduPoints</th><th class="p-3">Attendance</th><th class="p-3">Homework done</th></tr>
+                            </thead>
+                            <tbody id="leaderboardBody"></tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>`);
+                }
+                const portal = document.getElementById('studentPortal');
+                if (portal && !document.getElementById('siblingSwitcher')) {
+                    portal.insertAdjacentHTML('afterbegin', '<div id="siblingSwitcher" class="hidden bg-white border border-emerald-200 rounded-2xl p-4 shadow-sm"></div>');
+                }
+                const feeStatusBox = document.getElementById('modalStudentFeeStatus');
+                if (feeStatusBox && !document.getElementById('modalStudentDueDay')) {
+                    feeStatusBox.parentElement.insertAdjacentHTML('afterend', `
+                <div>
+                    <label class="block text-xs font-semibold text-slate-600 mb-1">Fee Due Day of every month (1-28, usually the admission day)</label>
+                    <input type="number" id="modalStudentDueDay" min="1" max="28" value="1" class="w-full px-3 py-2 text-sm rounded-xl border border-slate-300" required>
+                    <p class="text-[11px] text-slate-400 mt-1">The month's fee counts as "due" only from this day. Before it, it shows as "not due yet".</p>
+                </div>
+                <div>
+                    <label class="block text-xs font-semibold text-slate-600 mb-1">Link as brother/sister of (optional - shares one login)</label>
+                    <select id="modalSiblingPick" onchange="app.onSiblingPick(this.value)" class="w-full px-3 py-2 text-sm rounded-xl border border-slate-300"></select>
+                    <p id="modalSiblingNote" class="text-[11px] text-indigo-600 font-semibold mt-1"></p>
+                    <p class="text-[11px] text-slate-400 mt-1">Choosing a student copies their mobile number, password and parent details here. Both children then log in with the same mobile + password and switch between profiles.</p>
+                </div>`);
+                }
+            })();
+        })();
+
+       
+
         // Initialize App (only after the cloud data has been loaded, so every device starts with the same data)
         let app;
         Cloud.init().then(() => {
