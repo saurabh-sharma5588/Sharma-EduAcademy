@@ -4,6 +4,11 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Sharma EduAcademy - Tuition Management System</title>
+
+    <link rel="manifest" href="manifest.json">
+<meta name="theme-color" content="#047857">
+<link rel="apple-touch-icon" href="icon-192.png">
+    
     <!-- Tailwind CSS -->
     <script src="https://cdn.tailwindcss.com"></script>
     <!-- FontAwesome Icons -->
@@ -4735,8 +4740,47 @@
             })();
         })();
 
-       
+               // =====================================================================
+        // UPDATE PACK 4  -  install as a mobile app (PWA)
+        // (paste this whole block ABOVE the line "// Initialize App ...", below any earlier packs)
+        //  1. Registers the app helper file (sw.js) so the phone treats the site as an installable app
+        //  2. Shows a small "Install app" button when the phone allows installing
+        // Also needs: manifest.json, sw.js and the 3 icon files uploaded next to index.html,
+        // and 3 lines added inside <head> (see the guide).
+        // =====================================================================
+        (function () {
+            if ('serviceWorker' in navigator && (location.protocol === 'https:' || location.hostname === 'localhost' || location.hostname === '127.0.0.1')) {
+                window.addEventListener('load', function () {
+                    navigator.serviceWorker.register('sw.js').catch(function () { /* the app still works without it */ });
+                });
+            }
 
+            var deferred = null;
+            function removeBtn() {
+                var b = document.getElementById('installAppBtn');
+                if (b) b.remove();
+            }
+            window.addEventListener('beforeinstallprompt', function (e) {
+                e.preventDefault();
+                deferred = e;
+                if (document.getElementById('installAppBtn')) return;
+                var btn = document.createElement('button');
+                btn.id = 'installAppBtn';
+                btn.type = 'button';
+                btn.textContent = 'Install app';
+                btn.setAttribute('style', 'position:fixed;right:14px;bottom:14px;z-index:80;background:#047857;color:#fff;border:0;border-radius:999px;padding:11px 18px;font:600 14px Arial,sans-serif;box-shadow:0 4px 14px rgba(0,0,0,.25);cursor:pointer;');
+                btn.addEventListener('click', function () {
+                    if (!deferred) return;
+                    deferred.prompt();
+                    deferred.userChoice.then(function () { deferred = null; removeBtn(); });
+                });
+                document.body.appendChild(btn);
+            });
+            window.addEventListener('appinstalled', removeBtn);
+        })();
+
+
+        
         // Initialize App (only after the cloud data has been loaded, so every device starts with the same data)
         let app;
         Cloud.init().then(() => {
