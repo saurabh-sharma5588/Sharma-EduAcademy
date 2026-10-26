@@ -4779,6 +4779,89 @@
             window.addEventListener('appinstalled', removeBtn);
         })();
 
+        // =====================================================================
+        // UPDATE PACK 5  -  stay logged in when you switch to another app and come back
+        // (paste this whole block ABOVE the line "// Initialize App ...", BELOW Update Pack 2 and any other packs)
+        // On a phone, Android often closes the app page in the background, which erased the login.
+        // Now the login is saved on the phone itself:
+        //   Teacher : logged out after 30 minutes without use
+        //   Parent  : stays logged in for 7 days (Logout button still logs out at once)
+        // You can change the two numbers just below.
+        // =====================================================================
+        (function () {
+            const P = TuitionApp.prototype;
+            const KEY = 'sharma_edu_session_v2';
+            const TEACHER_MS = 30 * 60 * 1000;            // <- teacher time limit (30 minutes)
+            const STUDENT_MS = 7 * 24 * 60 * 60 * 1000;   // <- parent time limit (7 days)
+            const limitFor = (role) => role === 'teacher' ? TEACHER_MS : STUDENT_MS;
+            const readSession = () => { try { return JSON.parse(localStorage.getItem(KEY) || 'null'); } catch (e) { return null; } };
+
+            P.saveSession = function (data) {
+                try { localStorage.setItem(KEY, JSON.stringify({ ...data, ts: Date.now() })); } catch (e) { /* ignore */ }
+                if (this._sessionTouch2) return;
+                this._sessionTouch2 = true;
+                let last = 0;
+                const touch = () => {
+                    const now = Date.now();
+                    if (now - last < 10000) return;
+                    last = now;
+                    const s = readSession();
+                    if (!s) return;
+                    s.ts = now;
+                    try { localStorage.setItem(KEY, JSON.stringify(s)); } catch (e) { /* ignore */ }
+                };
+                ['click', 'keydown', 'touchstart', 'scroll'].forEach((ev) => document.addEventListener(ev, touch, true));
+                // when you come back to the app, check the time limit
+                document.addEventListener('visibilitychange', () => {
+                    if (document.visibilityState === 'visible') this.checkSessionExpiry();
+                });
+            };
+
+            P.clearSession = function () {
+                try { localStorage.removeItem(KEY); sessionStorage.removeItem('sharma_edu_session'); } catch (e) { /* ignore */ }
+            };
+
+            P.checkSessionExpiry = function () {
+                if (!this.currentUserRole) return;
+                const s = readSession();
+                if (!s || Date.now() - (s.ts || 0) > limitFor(s.role)) {
+                    this.logout();
+                    alert('You were logged out because of inactivity.');
+                }
+            };
+
+            P.restoreSession = function () {
+                if (this._sessionRestored || this.currentUserRole) return;
+                this._sessionRestored = true;
+                const s = readSession();
+                if (!s || !s.role || Date.now() - (s.ts || 0) > limitFor(s.role)) { this.clearSession(); return; }
+                if (s.role === 'teacher') {
+                    this.completeTeacherLogin();
+                } else if (s.role === 'student') {
+                    const st = JSON.parse(localStorage.getItem(DB_KEYS.STUDENTS)).find((x) => x.id === s.studentId);
+                    if (!st) { this.clearSession(); return; }
+                    this.openStudentPortalFor(st);
+                }
+            };
+
+            // automatic logout timer: 30 minutes for the teacher, 7 days for parents
+            P.startIdleTimer = function () {
+                this.stopIdleTimer();
+                const ms = this.currentUserRole === 'teacher' ? TEACHER_MS : STUDENT_MS;
+                const reset = () => {
+                    clearTimeout(this.idleTimer);
+                    this.idleTimer = setTimeout(() => {
+                        if (this.currentUserRole) {
+                            this.logout();
+                            alert('You were logged out because of inactivity.');
+                        }
+                    }, ms);
+                };
+                this.idleReset = reset;
+                ['click', 'keydown', 'touchstart', 'mousemove'].forEach((ev) => document.addEventListener(ev, reset, true));
+                reset();
+            };
+        })();
 
         
         // Initialize App (only after the cloud data has been loaded, so every device starts with the same data)
