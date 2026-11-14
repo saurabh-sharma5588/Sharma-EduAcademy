@@ -6015,6 +6015,519 @@
             })();
         })();
 
+                  // =====================================================================
+        // UPDATE PACK 9  -  fee rule, correct Overview numbers, EduPoints categories
+        // (paste this whole block ABOVE the line "// Initialize App ...", BELOW Update Pack 8)
+        // Needs Update Pack 2, 6, 7 and 8 to be pasted first.
+        //  1. Settings > "Fee Collection Rule": choose
+        //       - AFTER the month ends (default): a month is shown as DUE only once that month is over
+        //         (on the student's due day of the NEXT month). The running month shows "Not due yet".
+        //       - IN ADVANCE: a month is due from the student's due day of the same month (old behaviour)
+        //     Parents and the teacher can still pay / mark a running month early in both rules.
+        //  2. Overview numbers now follow the money: "Collected" = fees received THIS calendar month
+        //     (even if they are for last month), "Pending" = months that are due now.
+        //  3. Settings > "EduPoints Categories": make your own categories (name + points). For each one tick
+        //     "Fixed points" (one click gives the set points) or untick it (you type the points each time).
+        //     Use them with the new "Give" button in the Students list.
+        //  4. Attendance and Homework: tick or untick "automatic / fixed" in "EduPoints Settings"
+        // =====================================================================
+        (function () {
+            const P = TuitionApp.prototype;
+            const SKEY = 'sharma_edu_settings';
+            const read = (k) => JSON.parse(localStorage.getItem(DB_KEYS[k]));
+            const clamp = (n, a, b) => Math.min(b, Math.max(a, n));
+
+            P.getSetting = function (name, def) {
+                try {
+                    const s = JSON.parse(localStorage.getItem(SKEY) || '{}') || {};
+                    return s[name] === undefined ? def : s[name];
+                } catch (e) { return def; }
+            };
+
+            // ---------- 1. FEE RULE ----------
+            P.getFeeMode = function () { return this.getSetting('feeMode', 'after') === 'advance' ? 'advance' : 'after'; };
+
+            // the day a month's fee becomes due for this student
+            P.dueDateOf = function (st, key) {
+                const parts = key.split('-').map(Number);
+                const day = this.dueDayOf(st);
+                return this.getFeeMode() === 'after' ? new Date(parts[0], parts[1], day) : new Date(parts[0], parts[1] - 1, day);
+            };
+            P.dueDateText = function (st, key) {
+                return this.dueDateOf(st, key).toLocaleDateString(undefined, { day: 'numeric', month: 'short' });
+            };
+            P.isMonthDueNow = function (st, key) { return Date.now() >= this.dueDateOf(st, key).getTime(); };
+
+            P.setFeeMode = function (mode) {
+                this.storePointSettings({ feeMode: mode === 'advance' ? 'advance' : 'after' });
+                this.renderSettingsTab();
+                this.renderStudentsTable();
+                this.refreshDueDayHint();
+                alert(mode === 'advance'
+                    ? 'Fee rule saved: a month is due from the due day of the SAME month.'
+                    : 'Fee rule saved: a month is due only AFTER it ends (from the due day of the next month).');
+            };
+
+            P.refreshDueDayHint = function () {
+                const input = document.getElementById('modalStudentDueDay');
+                if (!input) return;
+                const box = input.parentElement;
+                const label = box.querySelector('label');
+                const hint = box.querySelector('p');
+                const after = this.getFeeMode() === 'after';
+                if (label) label.textContent = after ? 'Fee Due Day (1-28): the day of the NEXT month when the fee of a finished month is due' : 'Fee Due Day of every month (1-28, usually the admission day)';
+                if (hint) hint.textContent = after ? 'Example: due day 5 means November\'s fee is due on 5 December. Until then it shows "Not due yet".' : 'The month\'s fee counts as "due" only from this day. Before it, it shows as "not due yet".';
+            };
+            const origAddModal = P.openAddStudentModal;
+            P.openAddStudentModal = function () { origAddModal.call(this); this.refreshDueDayHint(); };
+            const origEditModal = P.openEditStudentModal;
+            P.openEditStudentModal = function (id) { origEditModal.call(this, id); this.refreshDueDayHint(); };
+
+            // parent: month list
+            P.renderStudentMonths = function () {
+                const s = this.currentStudent;
+                const cur = this.currentMonthKey();
+                const start = s.joinMonth || cur;
+                const fee = Number(s.feeAmount) || 0;
+                const paid = this.getLedger()[s.id] || {};
+                const waiting = new Set();
+                read('PROOFS').filter((p) => p.studentId === s.id && p.status === 'Pending')
+                    .forEach((p) => ((p.months && p.months.length) ? p.months : [cur]).forEach((k) => waiting.add(k)));
+                const keys = start > cur ? [] : this.monthsBetween(start, cur);
+                const box = document.getElementById('spMonthsList');
+                if (keys.length === 0) { box.innerHTML = '<p class="text-xs text-slate-400">No fee months yet.</p>'; return; }
+                box.innerHTML = keys.map((k) => {
+                    const label = this.monthLabel(k);
+                    if (paid[k]) return `<div class="flex justify-between items-center p-2.5 bg-green-50 border border-green-200 rounded-xl text-xs"><span class="font-semibold text-slate-800">${label}</span><span class="font-bold text-green-700">Paid</span></div>`;
+                    if (waiting.has(k)) return `<div class="flex justify-between items-center p-2.5 bg-amber-50 border border-amber-200 rounded-xl text-xs"><span class="font-semibold text-slate-800">${label}</span><span class="font-bold text-amber-700">Awaiting teacher approval</span></div>`;
+                    if (!this.isMonthDueNow(s, k)) {
+                        return `<label class="flex justify-between items-center p-2.5 bg-slate-50 border border-slate-200 rounded-xl text-xs cursor-pointer"><span class="font-semibold text-slate-800"><input type="checkbox" class="pay-month-cb accent-emerald-600 mr-2" value="${k}" onchange="app.updateSelectedMonths()">${label}</span><span class="font-bold text-slate-500">Not due yet (due ${esc(this.dueDateText(s, k))}) - ₹${fee}. You may pay early.</span></label>`;
+                    }
+                    return `<label class="flex justify-between items-center p-2.5 bg-rose-50 border border-rose-200 rounded-xl text-xs cursor-pointer"><span class="font-semibold text-slate-800"><input type="checkbox" class="pay-month-cb accent-emerald-600 mr-2" value="${k}" checked onchange="app.updateSelectedMonths()">${label}</span><span class="font-bold text-rose-600">Due ₹${fee}</span></label>`;
+                }).join('');
+            };
+
+            // parent: texts that said "Paid" / "ALL PAID" even when the running month is simply not due yet
+            const origFeesTab = P.renderStudentFeesTab;
+            P.renderStudentFeesTab = function () {
+                origFeesTab.call(this);
+                const s = this.currentStudent;
+                if (!s) return;
+                const fee = esc(s.feeAmount);
+                const note = this.getFeeMode() === 'after'
+                    ? `Each month's fee is due on the ${this.ordinal(this.dueDayOf(s))} of the next month`
+                    : `Due on the ${this.ordinal(this.dueDayOf(s))} of every month`;
+                document.getElementById('spFeeAmount').innerHTML = `₹${fee}<span class="block text-xs font-medium text-slate-500">${note}</span>`;
+                const cur = this.currentMonthKey();
+                const curPaid = !!((this.getLedger()[s.id] || {})[cur]);
+                const dueCount = this.getDueMonths(s).length;
+                const badge = document.getElementById('spFeeBadgeDetailed');
+                if (badge && dueCount === 0 && !curPaid) { badge.innerText = 'NOTHING DUE NOW'; badge.className = 'px-3 py-1 rounded-full text-xs font-bold bg-slate-100 text-slate-600'; }
+            };
+
+            const origDash = P.renderStudentDashboardTab;
+            P.renderStudentDashboardTab = function () {
+                origDash.call(this);
+                const s = this.currentStudent;
+                const badge = document.getElementById('spFeeStatusBadge');
+                if (!s || !badge) return;
+                const cur = this.currentMonthKey();
+                const curPaid = !!((this.getLedger()[s.id] || {})[cur]);
+                if (this.getDueMonths(s).length === 0 && !curPaid) { badge.innerText = 'Nothing due now'; badge.className = 'text-xs px-2.5 py-1 rounded-full font-bold bg-slate-100 text-slate-600'; }
+            };
+
+            // teacher: the "Fees" window of one student
+            P.renderFeesModal = function () {
+                const st = read('STUDENTS').find((x) => x.id === this.feesModalStudentId);
+                if (!st) return;
+                const cur = this.currentMonthKey();
+                const start = st.joinMonth || cur;
+                const fee = Number(st.feeAmount) || 0;
+                const paid = this.getLedger()[st.id] || {};
+                const keys = start > cur ? [] : this.monthsBetween(start, cur);
+                const dues = keys.filter((k) => !paid[k] && this.isMonthDueNow(st, k));
+                document.getElementById('feesModalTitle').innerText = 'Fees - ' + st.name;
+                document.getElementById('feesModalSummary').innerText = `Monthly fee: ₹${fee} | Fees start: ${this.monthLabel(start)} | Due now: ${dues.length} month(s), ₹${dues.length * fee}`;
+                document.getElementById('feesModalSelTotal').innerText = '₹0';
+                document.getElementById('feesModalMonths').innerHTML = keys.length === 0
+                    ? '<p class="text-xs text-slate-400">No billable months yet.</p>'
+                    : keys.map((k) => {
+                        const label = this.monthLabel(k);
+                        if (paid[k]) {
+                            return `<div class="flex justify-between items-center p-2.5 bg-green-50 border border-green-200 rounded-xl text-xs">
+                                <span class="font-semibold text-slate-800">${label}</span>
+                                <span class="flex items-center gap-3">
+                                    <span class="font-bold text-green-700">Paid (${esc(paid[k].mode)})</span>
+                                    ${paid[k].mode !== 'Online' ? `<button type="button" onclick="app.undoMonthFromModal('${k}')" class="text-rose-600 font-semibold underline">Undo</button>` : ''}
+                                </span>
+                            </div>`;
+                        }
+                        const due = this.isMonthDueNow(st, k);
+                        return `<label class="flex justify-between items-center p-2.5 ${due ? 'bg-rose-50 border-rose-200' : 'bg-slate-50 border-slate-200'} border rounded-xl text-xs cursor-pointer">
+                            <span class="font-semibold text-slate-800"><input type="checkbox" class="fee-month-cb accent-emerald-600 mr-2" value="${k}" onchange="app.updateFeesModalTotal()">${label}</span>
+                            <span class="font-bold ${due ? 'text-rose-600' : 'text-slate-500'}">${due ? 'Due ₹' + fee : 'Not due yet (due ' + esc(this.dueDateText(st, k)) + ') - can be paid early'}</span>
+                        </label>`;
+                    }).join('');
+            };
+
+            // ---------- 2. OVERVIEW NUMBERS ----------
+            const origOverview = P.renderOverviewTab;
+            P.renderOverviewTab = function () {
+                origOverview.call(this);
+                const students = read('STUDENTS');
+                const ledger = this.getLedger();
+                const now = new Date();
+                const from = new Date(now.getFullYear(), now.getMonth(), 1).getTime();
+                const to = new Date(now.getFullYear(), now.getMonth() + 1, 1).getTime();
+                let collected = 0, pending = 0;
+                students.forEach((st) => {
+                    const fee = Number(st.feeAmount) || 0;
+                    const mine = ledger[st.id] || {};
+                    Object.keys(mine).forEach((k) => {
+                        const e = mine[k];
+                        if (e && e.paidAt >= from && e.paidAt < to) collected += (e.amount !== undefined ? Number(e.amount) || 0 : fee);
+                    });
+                    pending += this.getDueMonths(st, ledger).length * fee;
+                });
+                const total = collected + pending;
+                const rate = total > 0 ? Math.round((collected / total) * 100) : 0;
+                const set = (id, v) => { const el = document.getElementById(id); if (el) el.innerText = v; };
+                set('dashCollectedFees', '₹' + collected);
+                set('dashPendingFees', '₹' + pending);
+                set('dashCollectionRate', rate + '%');
+                set('dashProgressRatio', '₹' + collected + ' / ₹' + total);
+                const bar = document.getElementById('dashProgressBar');
+                if (bar) bar.style.width = rate + '%';
+                const label = (id, text) => { const el = document.getElementById(id); const p = el && el.parentElement && el.parentElement.querySelector('p'); if (p) p.innerText = text; };
+                label('dashCollectedFees', 'Collected This Month');
+                label('dashPendingFees', 'Pending Dues (due now)');
+                label('dashCollectionRate', 'Collection Rate');
+                const ratio = document.getElementById('dashProgressRatio');
+                const title = ratio && ratio.parentElement && ratio.parentElement.querySelector('span');
+                if (title) title.innerText = 'Fees collected this month vs still pending';
+                const note = document.getElementById('dashFeeNote');
+                if (note) note.innerText = this.getFeeMode() === 'after'
+                    ? 'Fee rule: a month becomes due after it ends. Change it in Settings > Fee Collection Rule. Collected = all money received this month, even for earlier months.'
+                    : 'Fee rule: a month is due from the due day of the same month. Change it in Settings > Fee Collection Rule. Collected = all money received this month.';
+            };
+
+            // ---------- 3. EDUPOINTS CATEGORIES + SETTINGS FLAGS ----------
+            P.getCategories = function () {
+                const c = this.getSetting('categories', []);
+                return Array.isArray(c) ? c.filter((x) => x && x.id && x.name) : [];
+            };
+
+            P.addCategory = function (e) {
+                e.preventDefault();
+                const name = document.getElementById('catName').value.trim();
+                const points = parseInt(document.getElementById('catPoints').value, 10);
+                const fixed = document.getElementById('catFixed').checked;
+                if (!name) { alert('Please type a category name.'); return; }
+                if (isNaN(points) || points === 0) { alert('Please type the points (use a minus sign for a deduction). It cannot be 0.'); return; }
+                const list = this.getCategories();
+                if (list.some((c) => c.name.toLowerCase() === name.toLowerCase())) { alert('A category with this name already exists.'); return; }
+                list.push({ id: 'c' + Date.now(), name, points, fixed });
+                this.storePointSettings({ categories: list });
+                document.getElementById('catName').value = '';
+                document.getElementById('catPoints').value = '';
+                this.renderCategoryList();
+            };
+
+            P.toggleCategoryFixed = function (id, fixed) {
+                this.storePointSettings({ categories: this.getCategories().map((c) => c.id === id ? { ...c, fixed: !!fixed } : c) });
+                this.renderCategoryList();
+            };
+
+            P.editCategory = function (id) {
+                const c = this.getCategories().find((x) => x.id === id);
+                if (!c) return;
+                const name = prompt('Category name:', c.name);
+                if (name === null) return;
+                const pts = prompt('Points for "' + (name.trim() || c.name) + '" (minus for a deduction):', String(c.points));
+                if (pts === null) return;
+                const n = parseInt(pts, 10);
+                if (!name.trim() || isNaN(n) || n === 0) { alert('Please give a name and points that are not 0.'); return; }
+                this.storePointSettings({ categories: this.getCategories().map((x) => x.id === id ? { ...x, name: name.trim(), points: n } : x) });
+                this.renderCategoryList();
+            };
+
+            P.deleteCategory = function (id) {
+                const c = this.getCategories().find((x) => x.id === id);
+                if (!c || !confirm('Delete the category "' + c.name + '"? Points already given stay as they are.')) return;
+                this.storePointSettings({ categories: this.getCategories().filter((x) => x.id !== id) });
+                this.renderCategoryList();
+            };
+
+            P.renderCategoryList = function () {
+                const box = document.getElementById('categoryList');
+                if (!box) return;
+                const list = this.getCategories();
+                box.innerHTML = list.length === 0
+                    ? '<p class="text-xs text-slate-400">No categories yet. Add one below, for example "Good behaviour" or "Test marks".</p>'
+                    : list.map((c) => `<div class="flex items-center justify-between gap-2 p-2.5 bg-slate-50 border border-slate-200 rounded-xl text-xs">
+                            <div class="min-w-0">
+                                <span class="font-bold text-slate-800">${esc(c.name)}</span>
+                                <span class="ml-1 font-bold ${c.points > 0 ? 'text-green-600' : 'text-rose-600'}">${c.points > 0 ? '+' : ''}${c.points}</span>
+                            </div>
+                            <div class="flex items-center gap-3 shrink-0">
+                                <label class="flex items-center gap-1 font-semibold text-slate-600 cursor-pointer"><input type="checkbox" ${c.fixed ? 'checked' : ''} onchange="app.toggleCategoryFixed('${c.id}', this.checked)" class="accent-emerald-600"> Fixed</label>
+                                <button type="button" onclick="app.editCategory('${c.id}')" class="text-indigo-600 font-semibold"><i class="fa-solid fa-pen-to-square"></i></button>
+                                <button type="button" onclick="app.deleteCategory('${c.id}')" class="text-rose-600 font-semibold"><i class="fa-solid fa-trash"></i></button>
+                            </div>
+                        </div>`).join('');
+            };
+
+            // give points (and remember why, last 30 entries per student)
+            P.awardPoints = function (studentId, pts, label) {
+                let name = '';
+                const list = read('STUDENTS').map((s) => {
+                    if (s.id !== studentId) return s;
+                    name = s.name;
+                    const log = [...(s.pointLog || []), { ts: Date.now(), cat: label, pts }].slice(-30);
+                    return { ...s, points: Math.max(0, (Number(s.points) || 0) + pts), pointLog: log };
+                });
+                if (!name) return;
+                localStorage.setItem(DB_KEYS.STUDENTS, JSON.stringify(list));
+                this.renderStudentsTable();
+                this.showToast((pts > 0 ? '+' : '') + pts + ' EduPoints to ' + name + ' (' + label + ')');
+            };
+
+            P.openGiveModal = function (studentId) {
+                const s = read('STUDENTS').find((x) => x.id === studentId);
+                if (!s) return;
+                document.getElementById('giveTitle').textContent = 'Give EduPoints to ' + s.name;
+                const cats = this.getCategories();
+                document.getElementById('giveList').innerHTML = (cats.length === 0
+                    ? '<p class="text-xs text-slate-500 p-1">You have not made any category yet. Add one in Settings > EduPoints Categories, or use "Other" below.</p>' : '')
+                    + cats.map((c) => `<button type="button" onclick="app.giveCategory('${studentId}', '${c.id}')" class="w-full text-left flex items-center justify-between gap-2 p-3 rounded-xl border border-slate-200 bg-slate-50 hover:bg-amber-50 transition">
+                            <span class="text-sm font-semibold text-slate-800">${esc(c.name)}</span>
+                            ${c.fixed ? `<span class="text-xs font-bold ${c.points > 0 ? 'text-green-600' : 'text-rose-600'}">${c.points > 0 ? '+' : ''}${c.points}</span>` : '<span class="text-[11px] font-semibold text-slate-500">you type the points</span>'}
+                        </button>`).join('')
+                    + `<button type="button" onclick="app.giveCategory('${studentId}', '__other')" class="w-full text-left flex items-center justify-between gap-2 p-3 rounded-xl border border-dashed border-slate-300 hover:bg-amber-50 transition"><span class="text-sm font-semibold text-slate-700">Other (type any points)</span><span class="text-[11px] font-semibold text-slate-500">you type the points</span></button>`;
+                document.getElementById('giveModal').style.display = 'flex';
+            };
+
+            P.closeGiveModal = function () { document.getElementById('giveModal').style.display = 'none'; };
+
+            P.giveCategory = function (studentId, catId) {
+                const c = catId === '__other' ? { name: 'Other', points: '', fixed: false } : this.getCategories().find((x) => x.id === catId);
+                if (!c) return;
+                let pts = c.points;
+                if (!c.fixed) {
+                    const v = prompt('How many EduPoints for "' + c.name + '"? (use a minus sign to take points away)', String(c.points));
+                    if (v === null) return;
+                    pts = parseInt(v, 10);
+                    if (isNaN(pts) || pts === 0) { alert('Please type a number that is not 0.'); return; }
+                }
+                this.closeGiveModal();
+                this.awardPoints(studentId, pts, c.name);
+            };
+
+            // settings form now also keeps the two tick boxes
+            P.savePointSettings = function (e) {
+                e.preventDefault();
+                const step = parseInt(document.getElementById('psStep').value, 10);
+                const attendance = parseInt(document.getElementById('psAttendance').value, 10);
+                const late = parseInt(document.getElementById('psLate').value, 10);
+                const homework = parseInt(document.getElementById('psHomework').value, 10);
+                if (!(step >= 1)) { alert('The + / - step must be 1 or more.'); return; }
+                if (![attendance, late, homework].every((n) => n >= 0)) { alert('Points cannot be negative.'); return; }
+                this.storePointSettings({ step, attendance, late, homework, attAuto: document.getElementById('psAttAuto').checked, hwFixed: document.getElementById('psHwFixed').checked });
+                alert('EduPoints settings saved.');
+                this.renderStudentsTable();
+            };
+
+            const origSettings = P.renderSettingsTab;
+            P.renderSettingsTab = function () {
+                origSettings.call(this);
+                const a = document.getElementById('psAttAuto');
+                const h = document.getElementById('psHwFixed');
+                if (a) a.checked = this.getSetting('attAuto', true) !== false;
+                if (h) h.checked = this.getSetting('hwFixed', true) !== false;
+                const mode = this.getFeeMode();
+                const r1 = document.getElementById('feeModeAfter');
+                const r2 = document.getElementById('feeModeAdvance');
+                if (r1) r1.checked = mode === 'after';
+                if (r2) r2.checked = mode === 'advance';
+                this.renderCategoryList();
+            };
+
+            // attendance: no automatic points when the box is unticked
+            const baseGet = P.getPointSettings;
+            P.getPointSettings = function () {
+                const c = baseGet.call(this);
+                return this._muteAttendance ? { ...c, attendance: 0, late: 0 } : c;
+            };
+            const origSaveAtt = P.saveTodayAttendance;
+            P.saveTodayAttendance = function () {
+                this._muteAttendance = this.getSetting('attAuto', true) === false;
+                try { origSaveAtt.call(this); } finally { this._muteAttendance = false; }
+            };
+
+            // homework: fixed points on one click, or type the points
+            P.setHomeworkResult = function (hwId, studentId, kind, pct, customPts) {
+                const full = this.getPointSettings().homework;
+                let newPts = 0;
+                if (kind === 'done') newPts = customPts !== undefined ? customPts : full;
+                else if (kind === 'partial') newPts = customPts !== undefined ? customPts : Math.round(full * pct / 100);
+                let delta = 0;
+                const list = read('HOMEWORK').map((hw) => {
+                    if (hw.id !== hwId) return hw;
+                    const credit = { ...(hw.credit || {}) };
+                    const completions = { ...(hw.completions || {}) };
+                    const partial = { ...(hw.partial || {}) };
+                    const was = credit[studentId] !== undefined ? (Number(credit[studentId]) || 0) : (completions[studentId] ? 10 : 0);
+                    delta = newPts - was;
+                    credit[studentId] = newPts;
+                    completions[studentId] = kind === 'done';
+                    if (kind === 'partial') partial[studentId] = customPts !== undefined ? clamp(Math.round(full > 0 ? (customPts / full) * 100 : 50), 1, 99) : pct; else delete partial[studentId];
+                    return { ...hw, credit, completions, partial };
+                });
+                localStorage.setItem(DB_KEYS.HOMEWORK, JSON.stringify(list));
+                if (delta) this.applyPointDeltas({ [studentId]: delta });
+                this.renderHomeworkTab();
+            };
+
+            P.hwDone = function (hwId, studentId) {
+                if (this.getSetting('hwFixed', true) !== false) { this.setHomeworkResult(hwId, studentId, 'done'); return; }
+                const v = prompt('How many EduPoints for this finished homework?', String(this.getPointSettings().homework));
+                if (v === null) return;
+                const n = parseInt(v, 10);
+                if (isNaN(n) || n < 0) { alert('Please type a number (0 or more).'); return; }
+                this.setHomeworkResult(hwId, studentId, 'done', undefined, n);
+            };
+
+            P.hwPartial = function (hwId, studentId) {
+                if (this.getSetting('hwFixed', true) !== false) {
+                    const v = prompt('How much of the homework did the student finish? (1 to 99 percent)', '50');
+                    if (v === null) return;
+                    const pct = parseInt(v, 10);
+                    if (isNaN(pct) || pct < 1 || pct > 99) { alert('Please enter a number from 1 to 99. Use "Done" for full homework.'); return; }
+                    this.setHomeworkResult(hwId, studentId, 'partial', pct);
+                    return;
+                }
+                const v = prompt('How many EduPoints for the partly finished homework?', String(Math.round(this.getPointSettings().homework / 2)));
+                if (v === null) return;
+                const n = parseInt(v, 10);
+                if (isNaN(n) || n < 0) { alert('Please type a number (0 or more).'); return; }
+                this.setHomeworkResult(hwId, studentId, 'partial', undefined, n);
+            };
+
+            // ---------- Students list: honest fee status + "Give" button ----------
+            P.renderStudentsTable = function () {
+                const students = read('STUDENTS');
+                const ledger = this.getLedger();
+                const search = (document.getElementById('studentSearch')?.value || '').toLowerCase();
+                const tbody = document.getElementById('studentsTableBody');
+                if (!tbody) return;
+                const cur = this.currentMonthKey();
+                const step = this.getPointSettings().step;
+                const filtered = students.filter((s) => s.name.toLowerCase().includes(search) || String(s.class).toLowerCase().includes(search));
+
+                tbody.innerHTML = filtered.map((s) => {
+                    const dueMonths = this.getDueMonths(s, ledger);
+                    const dueTotal = dueMonths.length * (Number(s.feeAmount) || 0);
+                    const dueHtml = dueMonths.length > 0
+                        ? `<span class="px-2.5 py-1 rounded-full text-xs font-bold bg-rose-100 text-rose-700" title="${esc(dueMonths.map((k) => this.monthLabel(k)).join(', '))}">${dueMonths.length} month${dueMonths.length > 1 ? 's' : ''} · ₹${dueTotal}</span>`
+                        : `<span class="px-2.5 py-1 rounded-full text-xs font-bold bg-green-100 text-green-700">No dues</span>`;
+                    const curPaid = !!((ledger[s.id] || {})[cur]);
+                    const statusHtml = dueMonths.length > 0
+                        ? `<span class="px-2.5 py-1 rounded-full text-xs font-bold bg-rose-100 text-rose-700">Unpaid</span>`
+                        : (curPaid || (s.joinMonth || cur) > cur
+                            ? `<span class="px-2.5 py-1 rounded-full text-xs font-bold bg-green-100 text-green-700">Paid</span>`
+                            : `<span class="px-2.5 py-1 rounded-full text-xs font-bold bg-amber-100 text-amber-700">Due ${esc(this.dueDateText(s, cur))}</span>`);
+                    const isSibling = students.filter((x) => x.mobile === s.mobile && x.password === s.password).length > 1;
+                    const bank = Number(s.bank) || 0;
+                    return `
+                    <tr class="hover:bg-slate-50 border-b border-slate-100">
+                        <td class="p-4 font-semibold text-slate-800">${esc(s.name)}${isSibling ? ' <span class="ml-1 text-[10px] font-bold bg-indigo-100 text-indigo-700 px-1.5 py-0.5 rounded-md" title="Shares one login with a brother/sister">Sibling</span>' : ''}</td>
+                        <td class="p-4">Class ${esc(s.class)}</td>
+                        <td class="p-4">${esc(s.mobile)}</td>
+                        <td class="p-4 font-medium">₹${esc(s.feeAmount)}</td>
+                        <td class="p-4">${statusHtml}</td>
+                        <td class="p-4">${dueHtml}</td>
+                        <td class="p-4">
+                            <div class="flex items-center gap-1 text-amber-600 font-bold">
+                                <i class="fa-solid fa-star text-xs"></i>
+                                <button type="button" onclick="app.stepPoints('${s.id}', -1)" title="Take away ${step} EduPoint(s)" class="min-w-[2rem] h-7 px-1 rounded-lg bg-rose-100 hover:bg-rose-200 text-rose-700 font-bold text-xs leading-none">−${step}</button>
+                                <input type="number" min="0" value="${Number(s.points) || 0}" onchange="app.updateStudentPoints('${s.id}', this.value)" class="w-20 px-2 py-1 text-sm font-bold text-amber-600 rounded-lg border border-slate-300 focus:ring-2 focus:ring-amber-400 focus:outline-none">
+                                <button type="button" onclick="app.stepPoints('${s.id}', 1)" title="Add ${step} EduPoint(s)" class="min-w-[2rem] h-7 px-1 rounded-lg bg-amber-100 hover:bg-amber-200 text-amber-700 font-bold text-xs leading-none">+${step}</button>
+                                <button type="button" onclick="app.openGiveModal('${s.id}')" title="Give EduPoints from a category" class="h-7 px-2 rounded-lg bg-indigo-100 hover:bg-indigo-200 text-indigo-700 font-bold text-xs leading-none">Give</button>
+                            </div>
+                            <p class="text-[10px] text-slate-500 font-semibold mt-1">Class rank #${this.getRank(s, 'class')} · Overall #${this.getRank(s, 'all')}${bank ? ' · Bank ' + bank : ''}</p>
+                        </td>
+                        <td class="p-4 text-right space-x-2 whitespace-nowrap">
+                            <button onclick="app.openFeesModal('${s.id}')" class="text-emerald-700 hover:text-emerald-900 font-medium text-xs bg-emerald-50 hover:bg-emerald-100 px-2.5 py-1.5 rounded-lg border border-emerald-200 transition">
+                                <i class="fa-solid fa-indian-rupee-sign"></i> Fees
+                            </button>
+                            <button onclick="app.openEditStudentModal('${s.id}')" class="text-indigo-600 hover:text-indigo-800 font-medium text-xs bg-indigo-50 hover:bg-indigo-100 px-2.5 py-1.5 rounded-lg border border-indigo-200 transition">
+                                <i class="fa-solid fa-pen-to-square"></i> Edit
+                            </button>
+                            <button onclick="app.deleteStudent('${s.id}')" class="text-rose-600 hover:text-rose-800 font-medium text-xs bg-rose-50 hover:bg-rose-100 px-2.5 py-1.5 rounded-lg border border-rose-200 transition">
+                                <i class="fa-solid fa-user-minus"></i> Leave
+                            </button>
+                        </td>
+                    </tr>`;
+                }).join('');
+            };
+
+            // ---------- new screen parts (added automatically) ----------
+            (function injectUi() {
+                const form = document.querySelector('#pointSettingsCard form');
+                if (form && !document.getElementById('psAttAuto')) {
+                    const att = document.getElementById('psAttendance');
+                    if (att) att.parentElement.insertAdjacentHTML('beforeend', '<label class="flex items-center gap-2 text-[11px] font-semibold text-slate-600 mt-2 cursor-pointer"><input type="checkbox" id="psAttAuto" class="accent-emerald-600"> Give attendance points automatically when I save attendance (untick = no automatic points)</label>');
+                    const hw = document.getElementById('psHomework');
+                    if (hw) hw.parentElement.insertAdjacentHTML('beforeend', '<label class="flex items-center gap-2 text-[11px] font-semibold text-slate-600 mt-2 cursor-pointer"><input type="checkbox" id="psHwFixed" class="accent-emerald-600"> "Done" gives exactly these points with one click (untick = I type the points each time)</label>');
+                }
+                const grid = document.querySelector('#teacherTab-settings .grid');
+                if (grid && !document.getElementById('feeRuleCard')) {
+                    grid.insertAdjacentHTML('afterbegin', `
+                    <div id="feeRuleCard" class="bg-white p-6 rounded-2xl shadow-sm border border-slate-100 space-y-3">
+                        <h3 class="font-bold text-slate-800 text-lg flex items-center gap-2"><i class="fa-solid fa-calendar-check text-emerald-600"></i> Fee Collection Rule</h3>
+                        <label class="flex items-start gap-3 p-3 rounded-xl border border-slate-200 cursor-pointer hover:bg-emerald-50">
+                            <input type="radio" name="feeMode" id="feeModeAfter" onchange="app.setFeeMode('after')" class="mt-1 accent-emerald-600">
+                            <span class="text-sm"><strong class="text-slate-800">After the month ends</strong><br><span class="text-xs text-slate-500">November's fee becomes due only from the due day of December. The running month shows "Not due yet".</span></span>
+                        </label>
+                        <label class="flex items-start gap-3 p-3 rounded-xl border border-slate-200 cursor-pointer hover:bg-emerald-50">
+                            <input type="radio" name="feeMode" id="feeModeAdvance" onchange="app.setFeeMode('advance')" class="mt-1 accent-emerald-600">
+                            <span class="text-sm"><strong class="text-slate-800">In advance (during the month)</strong><br><span class="text-xs text-slate-500">November's fee is due from the student's due day in November.</span></span>
+                        </label>
+                        <p class="text-[11px] text-slate-400">In both rules a parent or you can still pay or mark the running month early.</p>
+                    </div>
+                    <div id="categoryCard" class="bg-white p-6 rounded-2xl shadow-sm border border-slate-100 space-y-3">
+                        <h3 class="font-bold text-slate-800 text-lg flex items-center gap-2"><i class="fa-solid fa-tags text-amber-500"></i> EduPoints Categories</h3>
+                        <p class="text-xs text-slate-500">Make your own ways to give points. "Fixed" ticked: one click gives the points below. Unticked: you type the points each time. Use the <strong>Give</strong> button in the Students list.</p>
+                        <div id="categoryList" class="space-y-2"></div>
+                        <form onsubmit="app.addCategory(event)" class="space-y-2 pt-3 border-t border-slate-200">
+                            <div class="grid grid-cols-3 gap-2">
+                                <input type="text" id="catName" placeholder="Category name" maxlength="40" class="col-span-2 px-3 py-2 text-sm rounded-xl border border-slate-300">
+                                <input type="number" id="catPoints" placeholder="Points" class="px-3 py-2 text-sm rounded-xl border border-slate-300">
+                            </div>
+                            <label class="flex items-center gap-2 text-xs font-semibold text-slate-600 cursor-pointer"><input type="checkbox" id="catFixed" checked class="accent-emerald-600"> Fixed points (one click gives these points)</label>
+                            <button type="submit" class="bg-emerald-600 hover:bg-emerald-700 text-white font-medium text-sm px-4 py-2 rounded-xl transition">Add category</button>
+                        </form>
+                    </div>`);
+                }
+                if (!document.getElementById('giveModal')) {
+                    document.body.insertAdjacentHTML('beforeend', `
+                    <div id="giveModal" style="display:none" class="fixed inset-0 z-[60] bg-black/40 items-center justify-center p-4">
+                        <div class="bg-white rounded-2xl shadow-2xl w-full max-w-sm overflow-hidden">
+                            <div class="bg-gradient-to-r from-amber-500 to-orange-500 text-white p-4 flex justify-between items-center">
+                                <h3 id="giveTitle" class="font-bold">Give EduPoints</h3>
+                                <button type="button" onclick="app.closeGiveModal()" class="text-white/80 hover:text-white text-lg leading-none">&times;</button>
+                            </div>
+                            <div id="giveList" class="p-3 space-y-2 max-h-[60vh] overflow-y-auto"></div>
+                            <div class="p-3 border-t border-slate-100"><button type="button" onclick="app.closeGiveModal()" class="w-full bg-slate-100 hover:bg-slate-200 text-slate-700 font-semibold text-sm py-2.5 rounded-xl">Cancel</button></div>
+                        </div>
+                    </div>`);
+                }
+                const bar = document.getElementById('dashProgressBar');
+                const card = bar ? bar.closest('.bg-white') : null;
+                if (card && !document.getElementById('dashFeeNote')) card.insertAdjacentHTML('beforeend', '<p id="dashFeeNote" class="text-[11px] text-slate-400"></p>');
+            })();
+        })();
+
 
 
 
