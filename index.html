@@ -4,11 +4,6 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Sharma EduAcademy - Tuition Management System</title>
-
-    <link rel="manifest" href="manifest.json">
-<meta name="theme-color" content="#047857">
-<link rel="apple-touch-icon" href="icon-192.png">
-    
     <!-- Tailwind CSS -->
     <script src="https://cdn.tailwindcss.com"></script>
     <!-- FontAwesome Icons -->
@@ -974,7 +969,7 @@
             // Objects stored one document per top-level key (date / student id)
             const MAPS = ['sharma_edu_attendance', 'sharma_edu_fee_ledger'];
             // Single values (PIN hash, UPI settings...) stored as one document each in a shared collection
-            const META = ['sharma_edu_upi', 'sharma_edu_pin_hash', 'sharma_edu_pin_salt', 'sharma_edu_pin_weak', 'sharma_edu_fee_migrated'];
+            const META = ['sharma_edu_upi', 'sharma_edu_pin_hash', 'sharma_edu_pin_salt', 'sharma_edu_pin_weak', 'sharma_edu_fee_migrated', 'sharma_edu_settings'];
             const META_COL = 'sharma_edu_meta';
             const INIT_DOC = 'cloud_init';
             const MAX_DOC = 900000; // characters; Firestore's limit is about 1 MB per document
@@ -4740,130 +4735,1289 @@
             })();
         })();
 
-               // =====================================================================
-        // UPDATE PACK 4  -  install as a mobile app (PWA)
-        // (paste this whole block ABOVE the line "// Initialize App ...", below any earlier packs)
-        //  1. Registers the app helper file (sw.js) so the phone treats the site as an installable app
-        //  2. Shows a small "Install app" button when the phone allows installing
-        // Also needs: manifest.json, sw.js and the 3 icon files uploaded next to index.html,
-        // and 3 lines added inside <head> (see the guide).
-        // =====================================================================
-        (function () {
-            if ('serviceWorker' in navigator && (location.protocol === 'https:' || location.hostname === 'localhost' || location.hostname === '127.0.0.1')) {
-                window.addEventListener('load', function () {
-                    navigator.serviceWorker.register('sw.js').catch(function () { /* the app still works without it */ });
-                });
-            }
-
-            var deferred = null;
-            function removeBtn() {
-                var b = document.getElementById('installAppBtn');
-                if (b) b.remove();
-            }
-            window.addEventListener('beforeinstallprompt', function (e) {
-                e.preventDefault();
-                deferred = e;
-                if (document.getElementById('installAppBtn')) return;
-                var btn = document.createElement('button');
-                btn.id = 'installAppBtn';
-                btn.type = 'button';
-                btn.textContent = 'Install app';
-                btn.setAttribute('style', 'position:fixed;right:14px;bottom:14px;z-index:80;background:#047857;color:#fff;border:0;border-radius:999px;padding:11px 18px;font:600 14px Arial,sans-serif;box-shadow:0 4px 14px rgba(0,0,0,.25);cursor:pointer;');
-                btn.addEventListener('click', function () {
-                    if (!deferred) return;
-                    deferred.prompt();
-                    deferred.userChoice.then(function () { deferred = null; removeBtn(); });
-                });
-                document.body.appendChild(btn);
-            });
-            window.addEventListener('appinstalled', removeBtn);
-        })();
-
-        // =====================================================================
-        // UPDATE PACK 5  -  stay logged in when you switch to another app and come back
-        // (paste this whole block ABOVE the line "// Initialize App ...", BELOW Update Pack 2 and any other packs)
-        // On a phone, Android often closes the app page in the background, which erased the login.
-        // Now the login is saved on the phone itself:
-        //   Teacher : logged out after 30 minutes without use
-        //   Parent  : stays logged in for 7 days (Logout button still logs out at once)
-        // You can change the two numbers just below.
+                // =====================================================================
+        // UPDATE PACK 3  -  QR code / UPI payment fix
+        // (paste this whole block ABOVE the line "// Initialize App ...", below Update Pack 2 if you added it)
+        //  1. UPI ID is written the way payment apps expect (plain "name@bank")
+        //  2. Adds currency (INR) and a note to the payment link
+        //  3. New "Pay with UPI app" button for parents who are on the same phone (they cannot scan their own screen)
+        //  4. Clear messages when the UPI ID is still the sample one, or when the QR tool could not load
         // =====================================================================
         (function () {
             const P = TuitionApp.prototype;
-            const KEY = 'sharma_edu_session_v2';
-            const TEACHER_MS = 30 * 60 * 1000;            // <- teacher time limit (30 minutes)
-            const STUDENT_MS = 7 * 24 * 60 * 60 * 1000;   // <- parent time limit (7 days)
-            const limitFor = (role) => role === 'teacher' ? TEACHER_MS : STUDENT_MS;
-            const readSession = () => { try { return JSON.parse(localStorage.getItem(KEY) || 'null'); } catch (e) { return null; } };
+            const SAMPLE_UPI = 'sharmaedu@upi';
 
-            P.saveSession = function (data) {
-                try { localStorage.setItem(KEY, JSON.stringify({ ...data, ts: Date.now() })); } catch (e) { /* ignore */ }
-                if (this._sessionTouch2) return;
-                this._sessionTouch2 = true;
-                let last = 0;
-                const touch = () => {
-                    const now = Date.now();
-                    if (now - last < 10000) return;
-                    last = now;
-                    const s = readSession();
-                    if (!s) return;
-                    s.ts = now;
-                    try { localStorage.setItem(KEY, JSON.stringify(s)); } catch (e) { /* ignore */ }
-                };
-                ['click', 'keydown', 'touchstart', 'scroll'].forEach((ev) => document.addEventListener(ev, touch, true));
-                // when you come back to the app, check the time limit
-                document.addEventListener('visibilitychange', () => {
-                    if (document.visibilityState === 'visible') this.checkSessionExpiry();
-                });
+            const cleanUpi = (cfg) => encodeURIComponent(String(cfg.upiId || '').trim()).replace(/%40/g, '@');
+            const isSample = (cfg) => String(cfg.upiId || '').trim().toLowerCase() === SAMPLE_UPI;
+
+            const upiLink = function (cfg, amount) {
+                let url = 'upi://pay?pa=' + cleanUpi(cfg) + '&pn=' + encodeURIComponent(cfg.payeeName || '') + '&cu=INR';
+                if (amount) url += '&am=' + Number(amount).toFixed(2) + '&tn=' + encodeURIComponent('Tuition fee');
+                return url;
             };
 
-            P.clearSession = function () {
-                try { localStorage.removeItem(KEY); sessionStorage.removeItem('sharma_edu_session'); } catch (e) { /* ignore */ }
-            };
-
-            P.checkSessionExpiry = function () {
-                if (!this.currentUserRole) return;
-                const s = readSession();
-                if (!s || Date.now() - (s.ts || 0) > limitFor(s.role)) {
-                    this.logout();
-                    alert('You were logged out because of inactivity.');
+            const drawQr = function (box, text) {
+                box.innerHTML = '';
+                if (typeof QRCode === 'undefined') {
+                    box.innerHTML = '<p class="text-xs text-rose-600 p-3" style="max-width:220px">The QR code tool could not load. Check the internet, or turn off the ad-blocker for this site. You can still use the UPI ID or the "Pay with UPI app" button.</p>';
+                    return false;
+                }
+                try {
+                    new QRCode(box, { text: text, width: 160, height: 160 });
+                    return true;
+                } catch (e) {
+                    box.innerHTML = '<p class="text-xs text-rose-600 p-3">The QR code could not be drawn. Please refresh the page.</p>';
+                    return false;
                 }
             };
 
-            P.restoreSession = function () {
-                if (this._sessionRestored || this.currentUserRole) return;
-                this._sessionRestored = true;
-                const s = readSession();
-                if (!s || !s.role || Date.now() - (s.ts || 0) > limitFor(s.role)) { this.clearSession(); return; }
-                if (s.role === 'teacher') {
-                    this.completeTeacherLogin();
-                } else if (s.role === 'student') {
-                    const st = JSON.parse(localStorage.getItem(DB_KEYS.STUDENTS)).find((x) => x.id === s.studentId);
-                    if (!st) { this.clearSession(); return; }
-                    this.openStudentPortalFor(st);
+            // Teacher: QR preview in Settings
+            P.generateTeacherQr = function () {
+                const box = document.getElementById('teacherQrPreview');
+                if (!box) return;
+                const cfg = JSON.parse(localStorage.getItem(DB_KEYS.UPI_CONFIG));
+                drawQr(box, upiLink(cfg));
+                let note = document.getElementById('teacherQrNote');
+                if (!note) {
+                    note = document.createElement('p');
+                    note.id = 'teacherQrNote';
+                    box.parentElement.appendChild(note);
+                }
+                if (isSample(cfg)) {
+                    note.className = 'text-xs mt-2 font-semibold text-rose-600';
+                    note.innerText = 'This is the SAMPLE UPI ID, so payments will fail. Type your real UPI ID above and press Save UPI Config.';
+                } else {
+                    note.className = 'text-xs mt-2 text-slate-500';
+                    note.innerText = 'Test it: scan this with GPay or PhonePe from another phone. Your name should appear before paying.';
                 }
             };
 
-            // automatic logout timer: 30 minutes for the teacher, 7 days for parents
-            P.startIdleTimer = function () {
-                this.stopIdleTimer();
-                const ms = this.currentUserRole === 'teacher' ? TEACHER_MS : STUDENT_MS;
-                const reset = () => {
-                    clearTimeout(this.idleTimer);
-                    this.idleTimer = setTimeout(() => {
-                        if (this.currentUserRole) {
-                            this.logout();
-                            alert('You were logged out because of inactivity.');
-                        }
-                    }, ms);
-                };
-                this.idleReset = reset;
-                ['click', 'keydown', 'touchstart', 'mousemove'].forEach((ev) => document.addEventListener(ev, reset, true));
-                reset();
+            // Parent: "Pay with UPI app" button (added automatically under the UPI ID text)
+            const ensurePayButton = function () {
+                let btn = document.getElementById('spPayNowBtn');
+                if (btn) return btn;
+                const after = document.getElementById('spUpiIdText');
+                if (!after) return document.createElement('a');
+                after.insertAdjacentHTML('afterend',
+                    '<div id="spPayNowBox" class="space-y-1"><a id="spPayNowBtn" href="#" class="hidden inline-block bg-emerald-600 hover:bg-emerald-700 text-white font-semibold text-sm px-5 py-2.5 rounded-xl shadow">Pay with UPI app</a>' +
+                    '<p class="text-[11px] text-slate-500">Using this same phone? Tap the button instead of scanning. It opens GPay, PhonePe or Paytm with the amount filled in.</p></div>');
+                return document.getElementById('spPayNowBtn');
+            };
+
+            P.updateSelectedMonths = function () {
+                const s = this.currentStudent;
+                const cfg = JSON.parse(localStorage.getItem(DB_KEYS.UPI_CONFIG));
+                const n = document.querySelectorAll('.pay-month-cb:checked').length;
+                const total = n * (Number(s.feeAmount) || 0);
+                document.getElementById('spPayTotal').innerText = n > 0 ? `₹${total} (${n} month${n > 1 ? 's' : ''})` : '₹0';
+
+                const qrBox = document.getElementById('studentQrCode');
+                const btn = ensurePayButton();
+                if (isSample(cfg)) {
+                    qrBox.innerHTML = '<p class="text-xs text-rose-600 p-4">The teacher has not set the UPI ID yet. Please ask the teacher.</p>';
+                    btn.classList.add('hidden');
+                    return;
+                }
+                if (n > 0) {
+                    const link = upiLink(cfg, total);
+                    drawQr(qrBox, link);
+                    btn.setAttribute('href', link);
+                    btn.classList.remove('hidden');
+                } else {
+                    qrBox.innerHTML = '<p class="text-xs text-slate-400 p-4">Tick at least one month above to see the QR code.</p>';
+                    btn.classList.add('hidden');
+                }
             };
         })();
 
-        
+
+        // =====================================================================
+        // UPDATE PACK 3  -  QR code / UPI payment fix
+        // (paste this whole block ABOVE the line "// Initialize App ...", below Update Pack 2 if you added it)
+        //  1. UPI ID is written the way payment apps expect (plain "name@bank")
+        //  2. Adds currency (INR) and a note to the payment link
+        //  3. New "Pay with UPI app" button for parents who are on the same phone (they cannot scan their own screen)
+        //  4. Clear messages when the UPI ID is still the sample one, or when the QR tool could not load
+        // =====================================================================
+        (function () {
+            const P = TuitionApp.prototype;
+            const SAMPLE_UPI = 'sharmaedu@upi';
+
+            const cleanUpi = (cfg) => encodeURIComponent(String(cfg.upiId || '').trim()).replace(/%40/g, '@');
+            const isSample = (cfg) => String(cfg.upiId || '').trim().toLowerCase() === SAMPLE_UPI;
+
+            const upiLink = function (cfg, amount) {
+                let url = 'upi://pay?pa=' + cleanUpi(cfg) + '&pn=' + encodeURIComponent(cfg.payeeName || '') + '&cu=INR';
+                if (amount) url += '&am=' + Number(amount).toFixed(2) + '&tn=' + encodeURIComponent('Tuition fee');
+                return url;
+            };
+
+            const drawQr = function (box, text) {
+                box.innerHTML = '';
+                if (typeof QRCode === 'undefined') {
+                    box.innerHTML = '<p class="text-xs text-rose-600 p-3" style="max-width:220px">The QR code tool could not load. Check the internet, or turn off the ad-blocker for this site. You can still use the UPI ID or the "Pay with UPI app" button.</p>';
+                    return false;
+                }
+                try {
+                    new QRCode(box, { text: text, width: 160, height: 160 });
+                    return true;
+                } catch (e) {
+                    box.innerHTML = '<p class="text-xs text-rose-600 p-3">The QR code could not be drawn. Please refresh the page.</p>';
+                    return false;
+                }
+            };
+
+            // Teacher: QR preview in Settings
+            P.generateTeacherQr = function () {
+                const box = document.getElementById('teacherQrPreview');
+                if (!box) return;
+                const cfg = JSON.parse(localStorage.getItem(DB_KEYS.UPI_CONFIG));
+                drawQr(box, upiLink(cfg));
+                let note = document.getElementById('teacherQrNote');
+                if (!note) {
+                    note = document.createElement('p');
+                    note.id = 'teacherQrNote';
+                    box.parentElement.appendChild(note);
+                }
+                if (isSample(cfg)) {
+                    note.className = 'text-xs mt-2 font-semibold text-rose-600';
+                    note.innerText = 'This is the SAMPLE UPI ID, so payments will fail. Type your real UPI ID above and press Save UPI Config.';
+                } else {
+                    note.className = 'text-xs mt-2 text-slate-500';
+                    note.innerText = 'Test it: scan this with GPay or PhonePe from another phone. Your name should appear before paying.';
+                }
+            };
+
+            // Parent: "Pay with UPI app" button (added automatically under the UPI ID text)
+            const ensurePayButton = function () {
+                let btn = document.getElementById('spPayNowBtn');
+                if (btn) return btn;
+                const after = document.getElementById('spUpiIdText');
+                if (!after) return document.createElement('a');
+                after.insertAdjacentHTML('afterend',
+                    '<div id="spPayNowBox" class="space-y-1"><a id="spPayNowBtn" href="#" class="hidden inline-block bg-emerald-600 hover:bg-emerald-700 text-white font-semibold text-sm px-5 py-2.5 rounded-xl shadow">Pay with UPI app</a>' +
+                    '<p class="text-[11px] text-slate-500">Using this same phone? Tap the button instead of scanning. It opens GPay, PhonePe or Paytm with the amount filled in.</p></div>');
+                return document.getElementById('spPayNowBtn');
+            };
+
+            P.updateSelectedMonths = function () {
+                const s = this.currentStudent;
+                const cfg = JSON.parse(localStorage.getItem(DB_KEYS.UPI_CONFIG));
+                const n = document.querySelectorAll('.pay-month-cb:checked').length;
+                const total = n * (Number(s.feeAmount) || 0);
+                document.getElementById('spPayTotal').innerText = n > 0 ? `₹${total} (${n} month${n > 1 ? 's' : ''})` : '₹0';
+
+                const qrBox = document.getElementById('studentQrCode');
+                const btn = ensurePayButton();
+                if (isSample(cfg)) {
+                    qrBox.innerHTML = '<p class="text-xs text-rose-600 p-4">The teacher has not set the UPI ID yet. Please ask the teacher.</p>';
+                    btn.classList.add('hidden');
+                    return;
+                }
+                if (n > 0) {
+                    const link = upiLink(cfg, total);
+                    drawQr(qrBox, link);
+                    btn.setAttribute('href', link);
+                    btn.classList.remove('hidden');
+                } else {
+                    qrBox.innerHTML = '<p class="text-xs text-slate-400 p-4">Tick at least one month above to see the QR code.</p>';
+                    btn.classList.add('hidden');
+                }
+            };
+        })();
+       
+                  // =====================================================================
+        // UPDATE PACK 6  -  EduPoints system
+        // (paste this whole block ABOVE the line "// Initialize App ...", BELOW Update Pack 2 and Update Pack 5)
+        // Needs Update Pack 2 to be pasted first.
+        //  1. EduPoints Settings (Settings tab): how many points the + and - buttons change,
+        //     points for Present, Late and for a finished homework
+        //  2. "-" and "+" buttons for EduPoints in the Students list
+        //  3. Attendance gives points automatically when you press Save (Absent gives nothing)
+        //  4. Homework: "Done" and "Partial" buttons for every student (points are given automatically)
+        //  5. Edu Bank tab: send everybody's current points to a permanent bank, current points become 0
+        //     and a new round starts. Rank always follows the CURRENT points only.
+        // ONE small edit is also needed inside the Cloud code (see the guide): add 'sharma_edu_settings'
+        // to the META list, so these settings reach every device.
+        // =====================================================================
+        (function () {
+            const P = TuitionApp.prototype;
+            const SKEY = 'sharma_edu_settings';
+            const read = (k) => JSON.parse(localStorage.getItem(DB_KEYS[k]));
+            const whole = (v, d, min) => { const n = parseInt(v, 10); return (isNaN(n) || n < min) ? d : n; };
+            const today = () => new Date().toLocaleDateString();
+
+            // ---------- settings ----------
+            P.getPointSettings = function () {
+                let s = {};
+                try { s = JSON.parse(localStorage.getItem(SKEY) || '{}') || {}; } catch (e) { s = {}; }
+                return {
+                    step: whole(s.step, 1, 1),
+                    attendance: whole(s.attendance, 2, 0),
+                    late: whole(s.late, 1, 0),
+                    homework: whole(s.homework, 10, 0),
+                    rounds: Array.isArray(s.rounds) ? s.rounds : []
+                };
+            };
+
+            P.storePointSettings = function (patch) {
+                let raw = {};
+                try { raw = JSON.parse(localStorage.getItem(SKEY) || '{}') || {}; } catch (e) { raw = {}; }
+                // keep everything already saved there (for example the logo), then the cleaned numbers, then the change
+                localStorage.setItem(SKEY, JSON.stringify({ ...raw, ...this.getPointSettings(), ...patch }));
+            };
+
+            P.savePointSettings = function (e) {
+                e.preventDefault();
+                const step = parseInt(document.getElementById('psStep').value, 10);
+                const attendance = parseInt(document.getElementById('psAttendance').value, 10);
+                const late = parseInt(document.getElementById('psLate').value, 10);
+                const homework = parseInt(document.getElementById('psHomework').value, 10);
+                if (!(step >= 1)) { alert('The + / - step must be 1 or more.'); return; }
+                if (![attendance, late, homework].every((n) => n >= 0)) { alert('Points cannot be negative.'); return; }
+                this.storePointSettings({ step, attendance, late, homework });
+                alert('EduPoints settings saved.');
+                this.renderStudentsTable();
+            };
+
+            const origSettings = P.renderSettingsTab;
+            P.renderSettingsTab = function () {
+                origSettings.call(this);
+                const c = this.getPointSettings();
+                const set = (id, v) => { const el = document.getElementById(id); if (el) el.value = v; };
+                set('psStep', c.step); set('psAttendance', c.attendance); set('psLate', c.late); set('psHomework', c.homework);
+            };
+
+            // ---------- change points (never below 0) ----------
+            P.applyPointDeltas = function (map) {
+                const list = read('STUDENTS').map((s) => (map[s.id] !== undefined)
+                    ? { ...s, points: Math.max(0, (Number(s.points) || 0) + map[s.id]) } : s);
+                localStorage.setItem(DB_KEYS.STUDENTS, JSON.stringify(list));
+            };
+
+            // one tap on + / - changes the points by the step from Settings
+            P.stepPoints = function (id, dir) {
+                this.applyPointDeltas({ [id]: dir * this.getPointSettings().step });
+                this.renderStudentsTable();
+            };
+            P.addStudentPoints = function (id) { this.stepPoints(id, 1); };
+
+            // ---------- attendance gives points ----------
+            P.saveTodayAttendance = function () {
+                const date = document.getElementById('attendanceDate').value;
+                const students = read('STUDENTS');
+                const attendanceDb = read('ATTENDANCE');
+                const record = {};
+                document.querySelectorAll('#attendanceTableBody tr').forEach((row, i) => {
+                    const st = students[i];
+                    const sel = row.querySelector('select');
+                    if (st && sel) record[st.id] = sel.value;
+                });
+                attendanceDb[date] = record;
+                localStorage.setItem(DB_KEYS.ATTENDANCE, JSON.stringify(attendanceDb));
+
+                // Points for this date. Saving the same date again only adds or removes the DIFFERENCE,
+                // so nobody gets points twice and a correction (Present -> Absent) takes the points back.
+                const cfg = this.getPointSettings();
+                const worth = (status) => status === 'Present' ? cfg.attendance : (status === 'Late' ? cfg.late : 0);
+                let net = 0;
+                const updated = students.map((s) => {
+                    if (record[s.id] === undefined) return s;
+                    const awarded = { ...(s.awarded || {}) };
+                    const att = { ...(awarded.att || {}) };
+                    const before = Number(att[date]) || 0;
+                    const now = worth(record[s.id]);
+                    if (att[date] !== undefined && before === now) return s;
+                    att[date] = now;
+                    awarded.att = att;
+                    net += now - before;
+                    return { ...s, awarded, points: Math.max(0, (Number(s.points) || 0) + (now - before)) };
+                });
+                localStorage.setItem(DB_KEYS.STUDENTS, JSON.stringify(updated));
+
+                this.todayAttendanceModified = false;
+                alert('Attendance saved for ' + date + '!' + (net !== 0 ? '\nEduPoints ' + (net > 0 ? 'given' : 'taken back') + ' in total: ' + (net > 0 ? '+' : '') + net : ''));
+                this.renderAttendanceTab();
+            };
+
+            // ---------- homework: Done / Partial / Undo for every student ----------
+            P.setHomeworkResult = function (hwId, studentId, kind, pct) {
+                const full = this.getPointSettings().homework;
+                const newPts = kind === 'done' ? full : (kind === 'partial' ? Math.round(full * pct / 100) : 0);
+                let delta = 0;
+                const list = read('HOMEWORK').map((hw) => {
+                    if (hw.id !== hwId) return hw;
+                    const credit = { ...(hw.credit || {}) };
+                    const completions = { ...(hw.completions || {}) };
+                    const partial = { ...(hw.partial || {}) };
+                    // homework marked before this update gave a fixed 10 points
+                    const was = credit[studentId] !== undefined ? (Number(credit[studentId]) || 0) : (completions[studentId] ? 10 : 0);
+                    delta = newPts - was;
+                    credit[studentId] = newPts;
+                    completions[studentId] = kind === 'done';
+                    if (kind === 'partial') partial[studentId] = pct; else delete partial[studentId];
+                    return { ...hw, credit, completions, partial };
+                });
+                localStorage.setItem(DB_KEYS.HOMEWORK, JSON.stringify(list));
+                if (delta) this.applyPointDeltas({ [studentId]: delta });
+                this.renderHomeworkTab();
+            };
+
+            P.hwDone = function (hwId, studentId) { this.setHomeworkResult(hwId, studentId, 'done'); };
+            P.hwUndo = function (hwId, studentId) { this.setHomeworkResult(hwId, studentId, 'none'); };
+            P.hwPartial = function (hwId, studentId) {
+                const v = prompt('How much of the homework did the student finish? (1 to 99 percent)', '50');
+                if (v === null) return;
+                const pct = parseInt(v, 10);
+                if (isNaN(pct) || pct < 1 || pct > 99) { alert('Please enter a number from 1 to 99. Use "Done" for full homework.'); return; }
+                this.setHomeworkResult(hwId, studentId, 'partial', pct);
+            };
+            // the old tick-box call (kept so nothing else breaks)
+            P.toggleHomeworkDone = function (hwId, studentId, isDone) {
+                this.setHomeworkResult(hwId, studentId, isDone ? 'done' : 'none');
+            };
+
+            P.renderHomeworkStudentCheckboxes = function (hw, students) {
+                let list = students;
+                if (hw.mode === 'CLASS') list = students.filter((s) => s.class === hw.targetClass);
+                else if (hw.mode === 'INDIVIDUAL') list = students.filter((s) => s.id === hw.targetStudentId);
+                if (list.length === 0) return '<p class="text-xs text-slate-400">No students for this homework.</p>';
+                return list.map((s) => {
+                    const done = !!(hw.completions && hw.completions[s.id]);
+                    const pct = hw.partial && hw.partial[s.id];
+                    const pts = (hw.credit && hw.credit[s.id] !== undefined) ? hw.credit[s.id] : (done ? 10 : 0);
+                    const seenAt = hw.seen && hw.seen[s.id];
+                    const pill = done
+                        ? `<span class="px-2 py-0.5 rounded-full font-bold bg-green-100 text-green-700">Done +${pts}</span>`
+                        : (pct ? `<span class="px-2 py-0.5 rounded-full font-bold bg-amber-100 text-amber-700">Partial ${pct}% +${pts}</span>`
+                            : `<span class="px-2 py-0.5 rounded-full font-bold bg-slate-100 text-slate-500">Not done</span>`);
+                    const seen = seenAt
+                        ? `<span class="text-indigo-600 font-medium" title="Seen on ${esc(new Date(seenAt).toLocaleString())}"><i class="fa-solid fa-eye"></i> Seen</span>`
+                        : `<span class="text-slate-400 font-medium"><i class="fa-regular fa-eye-slash"></i> Not seen yet</span>`;
+                    return `
+                    <div class="p-2.5 bg-white rounded-xl border border-slate-200 text-xs space-y-2">
+                        <div class="flex items-center justify-between gap-2">
+                            <span class="font-semibold text-slate-800">${esc(s.name)}</span>
+                            ${pill}
+                        </div>
+                        <div class="flex items-center justify-between gap-2 flex-wrap">
+                            ${seen}
+                            <div class="flex gap-1">
+                                <button type="button" onclick="app.hwDone('${hw.id}','${s.id}')" class="px-2 py-1 rounded-lg font-semibold bg-emerald-600 hover:bg-emerald-700 text-white">Done</button>
+                                <button type="button" onclick="app.hwPartial('${hw.id}','${s.id}')" class="px-2 py-1 rounded-lg font-semibold bg-amber-100 hover:bg-amber-200 text-amber-800">Partial</button>
+                                <button type="button" onclick="app.hwUndo('${hw.id}','${s.id}')" class="px-2 py-1 rounded-lg font-semibold bg-slate-100 hover:bg-slate-200 text-slate-600">Undo</button>
+                            </div>
+                        </div>
+                    </div>`;
+                }).join('');
+            };
+
+            // ---------- Students list: - / + buttons, ranks and bank ----------
+            P.renderStudentsTable = function () {
+                const students = read('STUDENTS');
+                const ledger = this.getLedger();
+                const search = (document.getElementById('studentSearch')?.value || '').toLowerCase();
+                const tbody = document.getElementById('studentsTableBody');
+                if (!tbody) return;
+                const cur = this.currentMonthKey();
+                const step = this.getPointSettings().step;
+                const filtered = students.filter((s) => s.name.toLowerCase().includes(search) || String(s.class).toLowerCase().includes(search));
+
+                tbody.innerHTML = filtered.map((s) => {
+                    const dueMonths = this.getDueMonths(s, ledger);
+                    const dueTotal = dueMonths.length * (Number(s.feeAmount) || 0);
+                    const dueHtml = dueMonths.length > 0
+                        ? `<span class="px-2.5 py-1 rounded-full text-xs font-bold bg-rose-100 text-rose-700" title="${esc(dueMonths.map((k) => this.monthLabel(k)).join(', '))}">${dueMonths.length} month${dueMonths.length > 1 ? 's' : ''} · ₹${dueTotal}</span>`
+                        : `<span class="px-2.5 py-1 rounded-full text-xs font-bold bg-green-100 text-green-700">No dues</span>`;
+                    const notDueYet = s.feeStatus !== 'Paid' && (s.joinMonth || cur) <= cur && !this.isMonthDueNow(s, cur);
+                    const statusHtml = s.feeStatus === 'Paid'
+                        ? `<span class="px-2.5 py-1 rounded-full text-xs font-bold bg-green-100 text-green-700">Paid</span>`
+                        : (notDueYet
+                            ? `<span class="px-2.5 py-1 rounded-full text-xs font-bold bg-amber-100 text-amber-700">Due on ${this.ordinal(this.dueDayOf(s))}</span>`
+                            : `<span class="px-2.5 py-1 rounded-full text-xs font-bold bg-rose-100 text-rose-700">Unpaid</span>`);
+                    const isSibling = students.filter((x) => x.mobile === s.mobile && x.password === s.password).length > 1;
+                    const bank = Number(s.bank) || 0;
+                    return `
+                    <tr class="hover:bg-slate-50 border-b border-slate-100">
+                        <td class="p-4 font-semibold text-slate-800">${esc(s.name)}${isSibling ? ' <span class="ml-1 text-[10px] font-bold bg-indigo-100 text-indigo-700 px-1.5 py-0.5 rounded-md" title="Shares one login with a brother/sister">Sibling</span>' : ''}</td>
+                        <td class="p-4">Class ${esc(s.class)}</td>
+                        <td class="p-4">${esc(s.mobile)}</td>
+                        <td class="p-4 font-medium">₹${esc(s.feeAmount)}</td>
+                        <td class="p-4">${statusHtml}</td>
+                        <td class="p-4">${dueHtml}</td>
+                        <td class="p-4">
+                            <div class="flex items-center gap-1 text-amber-600 font-bold">
+                                <i class="fa-solid fa-star text-xs"></i>
+                                <button type="button" onclick="app.stepPoints('${s.id}', -1)" title="Take away ${step} EduPoint(s)" class="min-w-[2rem] h-7 px-1 rounded-lg bg-rose-100 hover:bg-rose-200 text-rose-700 font-bold text-xs leading-none">−${step}</button>
+                                <input type="number" min="0" value="${Number(s.points) || 0}" onchange="app.updateStudentPoints('${s.id}', this.value)" class="w-20 px-2 py-1 text-sm font-bold text-amber-600 rounded-lg border border-slate-300 focus:ring-2 focus:ring-amber-400 focus:outline-none">
+                                <button type="button" onclick="app.stepPoints('${s.id}', 1)" title="Add ${step} EduPoint(s)" class="min-w-[2rem] h-7 px-1 rounded-lg bg-amber-100 hover:bg-amber-200 text-amber-700 font-bold text-xs leading-none">+${step}</button>
+                            </div>
+                            <p class="text-[10px] text-slate-500 font-semibold mt-1">Class rank #${this.getRank(s, 'class')} · Overall #${this.getRank(s, 'all')}${bank ? ' · Bank ' + bank : ''}</p>
+                        </td>
+                        <td class="p-4 text-right space-x-2 whitespace-nowrap">
+                            <button onclick="app.openFeesModal('${s.id}')" class="text-emerald-700 hover:text-emerald-900 font-medium text-xs bg-emerald-50 hover:bg-emerald-100 px-2.5 py-1.5 rounded-lg border border-emerald-200 transition">
+                                <i class="fa-solid fa-indian-rupee-sign"></i> Fees
+                            </button>
+                            <button onclick="app.openEditStudentModal('${s.id}')" class="text-indigo-600 hover:text-indigo-800 font-medium text-xs bg-indigo-50 hover:bg-indigo-100 px-2.5 py-1.5 rounded-lg border border-indigo-200 transition">
+                                <i class="fa-solid fa-pen-to-square"></i> Edit
+                            </button>
+                            <button onclick="app.deleteStudent('${s.id}')" class="text-rose-600 hover:text-rose-800 font-medium text-xs bg-rose-50 hover:bg-rose-100 px-2.5 py-1.5 rounded-lg border border-rose-200 transition">
+                                <i class="fa-solid fa-user-minus"></i> Leave
+                            </button>
+                        </td>
+                    </tr>`;
+                }).join('');
+            };
+
+            // ---------- EDU BANK ----------
+            P.sendToBank = function (onlyId) {
+                const students = read('STUDENTS');
+                const targets = onlyId ? students.filter((s) => s.id === onlyId) : students;
+                const withPts = targets.filter((s) => (Number(s.points) || 0) > 0);
+                if (withPts.length === 0) { alert('Nobody has current EduPoints to send to the bank.'); return; }
+                const total = withPts.reduce((a, s) => a + (Number(s.points) || 0), 0);
+                let label = '';
+                if (onlyId) {
+                    if (!confirm('Send ' + total + ' EduPoints of ' + withPts[0].name + ' to the Edu Bank? Current points will become 0.')) return;
+                    label = 'Single: ' + withPts[0].name;
+                } else {
+                    const answer = prompt('Name of this round (for example "1-15 Nov"). You can leave it empty.', '');
+                    if (answer === null) return;
+                    if (!confirm('Send ' + total + ' EduPoints of ' + withPts.length + ' student(s) to the Edu Bank?\n\nEveryone\'s current EduPoints become 0 and a new round starts. You can undo only the latest transfer.')) return;
+                    label = answer.trim() || ('Round ' + (this.getPointSettings().rounds.length + 1));
+                }
+                const rid = String(Date.now());
+                const ids = new Set(withPts.map((s) => s.id));
+                const updated = students.map((s) => {
+                    if (!ids.has(s.id)) return s;
+                    const pts = Number(s.points) || 0;
+                    return { ...s, points: 0, bank: (Number(s.bank) || 0) + pts, bankLog: [...(s.bankLog || []), { rid, date: today(), label, pts }] };
+                });
+                localStorage.setItem(DB_KEYS.STUDENTS, JSON.stringify(updated));
+                this.storePointSettings({ rounds: [...this.getPointSettings().rounds, { id: rid, date: today(), label, count: withPts.length, total }] });
+                this.renderBankTab();
+                alert(total + ' EduPoints moved to the Edu Bank. A new round has started.');
+            };
+
+            P.undoLastBankTransfer = function () {
+                const cfg = this.getPointSettings();
+                const last = cfg.rounds[cfg.rounds.length - 1];
+                if (!last) { alert('There is no transfer to undo.'); return; }
+                if (!confirm('Undo the latest transfer "' + last.label + '" (' + last.total + ' EduPoints)? The points go back from the bank to the students.')) return;
+                const updated = read('STUDENTS').map((s) => {
+                    const log = s.bankLog || [];
+                    const e = log.find((x) => x.rid === last.id);
+                    if (!e) return s;
+                    return { ...s, bank: Math.max(0, (Number(s.bank) || 0) - e.pts), points: (Number(s.points) || 0) + e.pts, bankLog: log.filter((x) => x.rid !== last.id) };
+                });
+                localStorage.setItem(DB_KEYS.STUDENTS, JSON.stringify(updated));
+                this.storePointSettings({ rounds: cfg.rounds.slice(0, -1) });
+                this.renderBankTab();
+            };
+
+            P.renderBankTab = function () {
+                const body = document.getElementById('bankBody');
+                if (!body) return;
+                const students = read('STUDENTS');
+                const cfg = this.getPointSettings();
+                const curTotal = students.reduce((a, s) => a + (Number(s.points) || 0), 0);
+                const bankTotal = students.reduce((a, s) => a + (Number(s.bank) || 0), 0);
+                document.getElementById('bankTotals').innerText = 'Current points of all students: ' + curTotal + '   |   Total in Edu Bank: ' + bankTotal;
+                body.innerHTML = students.length === 0
+                    ? '<tr><td colspan="6" class="p-6 text-center text-xs text-slate-400">No students yet.</td></tr>'
+                    : students.map((s) => {
+                        const cur = Number(s.points) || 0;
+                        const bank = Number(s.bank) || 0;
+                        return `<tr class="border-b border-slate-100 hover:bg-slate-50">
+                            <td class="p-3 font-semibold text-slate-800">${esc(s.name)}</td>
+                            <td class="p-3">Class ${esc(s.class)}</td>
+                            <td class="p-3 font-bold text-amber-600"><i class="fa-solid fa-star text-xs"></i> ${cur}</td>
+                            <td class="p-3 font-bold text-indigo-600"><i class="fa-solid fa-piggy-bank text-xs"></i> ${bank}</td>
+                            <td class="p-3 font-semibold text-slate-700">${cur + bank}</td>
+                            <td class="p-3 text-right"><button type="button" ${cur > 0 ? '' : 'disabled'} onclick="app.sendToBank('${s.id}')" class="text-xs font-semibold px-2.5 py-1.5 rounded-lg border ${cur > 0 ? 'text-indigo-700 bg-indigo-50 hover:bg-indigo-100 border-indigo-200' : 'text-slate-300 bg-slate-50 border-slate-200 cursor-not-allowed'}">Send to bank</button></td>
+                        </tr>`;
+                    }).join('');
+                const hist = document.getElementById('bankHistory');
+                const rounds = cfg.rounds.slice().reverse();
+                hist.innerHTML = rounds.length === 0
+                    ? '<p class="text-xs text-slate-400">No transfers yet.</p>'
+                    : rounds.map((r, i) => `<div class="flex justify-between items-center p-3 bg-slate-50 border border-slate-200 rounded-xl text-xs">
+                            <span><strong class="text-slate-800">${esc(r.label)}</strong> <span class="text-slate-500">· ${esc(r.date)} · ${r.count} student(s)</span></span>
+                            <span class="font-bold text-indigo-700">${r.total} pts${i === 0 ? ' <span class="ml-1 text-[10px] font-semibold text-amber-700">(latest, can be undone)</span>' : ''}</span>
+                        </div>`).join('');
+            };
+
+            const origSwitchTab = P.switchTeacherTab;
+            P.switchTeacherTab = function (tabName) {
+                origSwitchTab.call(this, tabName);
+                if (tabName === 'bank') this.renderBankTab();
+            };
+
+            // ---------- new screen parts (added automatically) ----------
+            (function injectUi() {
+                const settingsBtn = document.getElementById('tabNav-settings');
+                if (settingsBtn && !document.getElementById('tabNav-bank')) {
+                    settingsBtn.insertAdjacentHTML('beforebegin', `
+                <button onclick="app.switchTeacherTab('bank')" id="tabNav-bank" class="teacher-tab-btn px-4 py-2 rounded-xl font-semibold text-sm whitespace-nowrap bg-white text-slate-600 hover:bg-slate-100 border">
+                    <i class="fa-solid fa-piggy-bank mr-1"></i> Edu Bank
+                </button>`);
+                }
+                const settingsTab = document.getElementById('teacherTab-settings');
+                if (settingsTab && !document.getElementById('teacherTab-bank')) {
+                    settingsTab.insertAdjacentHTML('beforebegin', `
+            <div id="teacherTab-bank" class="teacher-tab-content space-y-4 hidden">
+                <div class="bg-white p-6 rounded-2xl shadow-sm border border-slate-100 space-y-4">
+                    <div class="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3">
+                        <h3 class="font-bold text-slate-800 text-lg flex items-center gap-2"><i class="fa-solid fa-piggy-bank text-indigo-500"></i> Edu Bank</h3>
+                        <div class="flex flex-wrap gap-2">
+                            <button type="button" onclick="app.sendToBank()" class="bg-indigo-600 hover:bg-indigo-700 text-white font-medium text-sm px-4 py-2 rounded-xl shadow"><i class="fa-solid fa-arrow-right-to-bracket"></i> Send ALL current points to bank</button>
+                            <button type="button" onclick="app.undoLastBankTransfer()" class="bg-amber-100 hover:bg-amber-200 text-amber-800 font-medium text-sm px-4 py-2 rounded-xl"><i class="fa-solid fa-rotate-left"></i> Undo latest transfer</button>
+                        </div>
+                    </div>
+                    <p class="text-xs text-slate-500">The bank keeps every student's old points forever. After a transfer the current points become 0 and a new round starts. <strong>Rank is calculated from the current points only</strong>, never from the bank.</p>
+                    <p id="bankTotals" class="text-xs font-semibold text-slate-700"></p>
+                    <div class="overflow-x-auto">
+                        <table class="w-full text-left text-sm">
+                            <thead class="bg-slate-50 text-slate-600 font-semibold border-b border-slate-200">
+                                <tr><th class="p-3">Student</th><th class="p-3">Class</th><th class="p-3">Current</th><th class="p-3">In bank</th><th class="p-3">Total</th><th class="p-3 text-right">Action</th></tr>
+                            </thead>
+                            <tbody id="bankBody"></tbody>
+                        </table>
+                    </div>
+                </div>
+                <div class="bg-white p-6 rounded-2xl shadow-sm border border-slate-100 space-y-3">
+                    <h3 class="font-bold text-slate-800 flex items-center gap-2"><i class="fa-solid fa-clock-rotate-left text-indigo-500"></i> Transfer history</h3>
+                    <div id="bankHistory" class="space-y-2"></div>
+                </div>
+            </div>`);
+                }
+                const grid = settingsTab ? settingsTab.querySelector('.grid') : null;
+                if (grid && !document.getElementById('pointSettingsCard')) {
+                    grid.insertAdjacentHTML('afterbegin', `
+                    <div id="pointSettingsCard" class="bg-white p-6 rounded-2xl shadow-sm border border-slate-100 space-y-4">
+                        <h3 class="font-bold text-slate-800 text-lg flex items-center gap-2"><i class="fa-solid fa-star text-amber-500"></i> EduPoints Settings</h3>
+                        <form onsubmit="app.savePointSettings(event)" class="space-y-3">
+                            <div>
+                                <label class="block text-xs font-semibold text-slate-600 mb-1">+ / − button: points changed with one tap</label>
+                                <input type="number" id="psStep" min="1" class="w-full px-3 py-2 text-sm rounded-xl border border-slate-300" required>
+                            </div>
+                            <div>
+                                <label class="block text-xs font-semibold text-slate-600 mb-1">Attendance: points for PRESENT (Absent gets nothing)</label>
+                                <input type="number" id="psAttendance" min="0" class="w-full px-3 py-2 text-sm rounded-xl border border-slate-300" required>
+                            </div>
+                            <div>
+                                <label class="block text-xs font-semibold text-slate-600 mb-1">Attendance: points for LATE</label>
+                                <input type="number" id="psLate" min="0" class="w-full px-3 py-2 text-sm rounded-xl border border-slate-300" required>
+                            </div>
+                            <div>
+                                <label class="block text-xs font-semibold text-slate-600 mb-1">Homework: points for a fully finished homework</label>
+                                <input type="number" id="psHomework" min="0" class="w-full px-3 py-2 text-sm rounded-xl border border-slate-300" required>
+                                <p class="text-[11px] text-slate-400 mt-1">"Partial" gives the same share: for example 50% of these points.</p>
+                            </div>
+                            <button type="submit" class="bg-emerald-600 hover:bg-emerald-700 text-white font-medium text-sm px-4 py-2 rounded-xl transition">Save EduPoints Settings</button>
+                        </form>
+                    </div>`);
+                }
+            })();
+        })();
+
+
+                // =====================================================================
+        // UPDATE PACK 7  -  notifications, student portal and "homework seen"
+        // (paste this whole block ABOVE the line "// Initialize App ...", BELOW Update Pack 6)
+        // Needs Update Pack 2 and Update Pack 6 to be pasted first.
+        //  1. Bell icon in the top bar (teacher and student) with a number, and a pop-up on login
+        //     that lists what is new. A small message also appears when something arrives while the app is open.
+        //  2. Red number on the tabs: student (Dashboard, Homework, Doubts, Chat), teacher (Doubts, Messages)
+        //  3. Announcements move to the TOP of the student dashboard and new ones show a "NEW" tag
+        //  4. Student sees Class Rank AND Overall Rank, and an Edu Bank card
+        //  5. New "Leaderboard" tab in the student portal: ALL students, so a child can compare with everyone
+        //  6. Homework: the student's homework tab marks it as SEEN, and the teacher sees "Seen / Not seen yet"
+        //     next to every student; "Done / Partial" results are shown to the student too
+        // =====================================================================
+        (function () {
+            const P = TuitionApp.prototype;
+            const read = (k) => JSON.parse(localStorage.getItem(DB_KEYS[k]));
+            const DAY = 24 * 60 * 60 * 1000;
+
+            // small "last looked at" notes kept only on this phone/computer (not in the cloud)
+            const mkey = (name, id) => 'sharma_edu_m_' + name + (id ? '_' + id : '');
+            const getMark = (name, id) => {
+                let v = 0;
+                try { v = Number(localStorage.getItem(mkey(name, id))) || 0; } catch (e) { v = 0; }
+                if (!v) { v = Date.now(); try { localStorage.setItem(mkey(name, id), String(v)); } catch (e) { /* ignore */ } }
+                return v;
+            };
+            const touchMark = (name, id) => { try { localStorage.setItem(mkey(name, id), String(Date.now())); } catch (e) { /* ignore */ } };
+
+            const mineHw = (hw, s) => hw.mode === 'ALL' || (hw.mode === 'CLASS' && hw.targetClass === s.class) || (hw.mode === 'INDIVIDUAL' && hw.targetStudentId === s.id);
+
+            // ---------- what is new? ----------
+            P.getAlerts = function () {
+                const items = [];
+                if (this.currentUserRole === 'student' && this.currentStudent) {
+                    const s = this.currentStudent;
+                    const hw = read('HOMEWORK').filter((h) => mineHw(h, s) && !(h.seen && h.seen[s.id]) && Number(h.id) >= Date.now() - 14 * DAY).length;
+                    if (hw) items.push({ tab: 'homework', icon: 'fa-book-open', count: hw, text: hw + ' new homework', fresh: true });
+                    const dm = getMark('doubt', s.id);
+                    const answers = read('DOUBTS').filter((d) => d.studentId === s.id && d.reply && Number(d.replyTs) > dm).length;
+                    if (answers) items.push({ tab: 'doubts', icon: 'fa-circle-question', count: answers, text: 'Teacher answered ' + answers + ' of your doubt' + (answers > 1 ? 's' : ''), fresh: true });
+                    const cm = getMark('chat', s.id);
+                    const msgs = read('MESSAGES').filter((m) => m.studentId === s.id && m.sender === 'teacher' && Number(m.id) > cm).length;
+                    if (msgs) items.push({ tab: 'chat', icon: 'fa-comments', count: msgs, text: msgs + ' new message' + (msgs > 1 ? 's' : '') + ' from the teacher', fresh: true });
+                    const nm = getMark('notice', s.id);
+                    const notes = read('NOTICES').filter((n) => (n.target === 'ALL' || n.target === s.class) && Number(n.id) > nm).length;
+                    if (notes) items.push({ tab: 'dashboard', icon: 'fa-bullhorn', count: notes, text: notes + ' new announcement' + (notes > 1 ? 's' : ''), fresh: true });
+                } else if (this.currentUserRole === 'teacher') {
+                    const ids = new Set(read('STUDENTS').map((s) => s.id));
+                    const pend = read('DOUBTS').filter((d) => ids.has(d.studentId) && !d.reply);
+                    const tm = getMark('tdoubt');
+                    const fresh = pend.filter((d) => Number(d.id) > tm).length;
+                    if (pend.length) items.push({ tab: 'doubts', icon: 'fa-circle-question', count: pend.length, text: pend.length + ' doubt' + (pend.length > 1 ? 's' : '') + ' waiting for your answer' + (fresh ? ' (' + fresh + ' new)' : ''), fresh: fresh > 0 });
+                    const unread = read('MESSAGES').filter((m) => ids.has(m.studentId) && m.sender === 'parent' && !m.read).length;
+                    if (unread) items.push({ tab: 'messages', icon: 'fa-comments', count: unread, text: unread + ' unread message' + (unread > 1 ? 's' : '') + ' from parents', fresh: true });
+                    const proofs = this.getActiveProofs().filter((p) => p.status === 'Pending').length;
+                    if (proofs) items.push({ tab: 'verification', icon: 'fa-receipt', count: proofs, text: proofs + ' payment screenshot' + (proofs > 1 ? 's' : '') + ' to check', fresh: true });
+                }
+                return { items, total: items.reduce((a, i) => a + i.count, 0) };
+            };
+
+            // red number on a tab button
+            P.setTabBadge = function (btnId, n) {
+                const b = document.getElementById(btnId);
+                if (!b) return;
+                let s = b.querySelector('.tab-badge');
+                if (!n) { if (s) s.remove(); return; }
+                if (!s) {
+                    s = document.createElement('span');
+                    s.className = 'tab-badge ml-1.5 inline-flex items-center justify-center min-w-[18px] h-[18px] px-1 rounded-full bg-rose-500 text-white text-[10px] font-bold';
+                    b.appendChild(s);
+                }
+                s.textContent = n > 99 ? '99+' : String(n);
+            };
+
+            P.refreshBell = function () {
+                const bell = document.getElementById('notifBell');
+                if (!bell) return;
+                if (!this.currentUserRole) { bell.style.display = 'none'; return; }
+                bell.style.display = 'inline-block';
+                const a = this.getAlerts();
+                const badge = document.getElementById('notifBadge');
+                if (a.total > 0) { badge.style.display = 'flex'; badge.textContent = a.total > 99 ? '99+' : String(a.total); } else { badge.style.display = 'none'; }
+                const count = (tab) => { const it = a.items.find((i) => i.tab === tab); return it ? it.count : 0; };
+                if (this.currentUserRole === 'student') {
+                    ['dashboard', 'homework', 'doubts', 'chat'].forEach((t) => this.setTabBadge('spTabNav-' + t, count(t)));
+                } else {
+                    ['doubts', 'messages'].forEach((t) => this.setTabBadge('tabNav-' + t, count(t)));
+                }
+                this._lastTotal = a.total;
+            };
+
+            P.showToast = function (msg) {
+                const el = document.getElementById('notifToast');
+                if (!el) return;
+                el.textContent = msg;
+                el.style.display = 'block';
+                clearTimeout(this._toastTimer);
+                this._toastTimer = setTimeout(() => { el.style.display = 'none'; }, 6000);
+            };
+
+            P.openNotifPanel = function (pre) {
+                const a = pre || this.getAlerts();
+                const list = document.getElementById('notifList');
+                const title = document.getElementById('notifTitle');
+                if (!list) return;
+                title.textContent = this.currentUserRole === 'student' && this.currentStudent ? 'Hello ' + this.currentStudent.name + '!' : 'Needs your attention';
+                list.innerHTML = a.items.length === 0
+                    ? '<p class="text-sm text-slate-500 text-center py-6"><i class="fa-solid fa-circle-check text-emerald-500"></i> Nothing new. You are all caught up!</p>'
+                    : a.items.map((i) => `<button type="button" onclick="app.goAlert('${i.tab}')" class="w-full text-left flex items-center gap-3 p-3 rounded-xl border border-slate-200 bg-slate-50 hover:bg-emerald-50 transition">
+                            <span class="w-9 h-9 shrink-0 rounded-xl bg-emerald-100 text-emerald-700 flex items-center justify-center"><i class="fa-solid ${i.icon}"></i></span>
+                            <span class="flex-1 text-sm font-semibold text-slate-800">${esc(i.text)}</span>
+                            <i class="fa-solid fa-chevron-right text-slate-400 text-xs"></i>
+                        </button>`).join('');
+                document.getElementById('notifPanel').style.display = 'flex';
+            };
+
+            P.closeNotifPanel = function () {
+                const p = document.getElementById('notifPanel');
+                if (p) p.style.display = 'none';
+            };
+
+            P.goAlert = function (tab) {
+                this.closeNotifPanel();
+                if (this.currentUserRole === 'student') this.switchStudentTab(tab);
+                else if (this.currentUserRole === 'teacher') this.switchTeacherTab(tab);
+            };
+
+            // ---------- hooks: open the pop-up on login, update numbers everywhere ----------
+            P._autoShown = {};
+
+            const origPortal = P.renderStudentPortal;
+            P.renderStudentPortal = function () {
+                const key = 'student:' + (this.currentStudent && this.currentStudent.id);
+                let pre = null;
+                if (!this._autoShown[key]) { this._autoShown[key] = true; pre = this.getAlerts(); } // counted BEFORE the dashboard marks announcements as read
+                origPortal.call(this);
+                this.refreshBell();
+                if (pre && pre.items.some((i) => i.fresh)) this.openNotifPanel(pre);
+            };
+
+            const origTeacherLogin = P.completeTeacherLogin;
+            P.completeTeacherLogin = function () {
+                origTeacherLogin.call(this);
+                this.refreshBell();
+                if (!this._autoShown.teacher) {
+                    this._autoShown.teacher = true;
+                    const a = this.getAlerts();
+                    if (a.items.some((i) => i.fresh)) this.openNotifPanel(a);
+                }
+            };
+
+            const origLogout = P.logout;
+            P.logout = function () {
+                origLogout.call(this);
+                this._autoShown = {};
+                this._lastTotal = undefined;
+                this.closeNotifPanel();
+                this.refreshBell();
+            };
+
+            const origStudentTab = P.switchStudentTab;
+            P.switchStudentTab = function (tabName) {
+                origStudentTab.call(this, tabName);
+                const s = this.currentStudent;
+                if (tabName === 'leaderboard') this.renderStudentLeaderboard();
+                if (s && tabName === 'doubts') touchMark('doubt', s.id);
+                if (s && tabName === 'chat') touchMark('chat', s.id);
+                this.refreshBell();
+            };
+
+            const origTeacherTab = P.switchTeacherTab;
+            P.switchTeacherTab = function (tabName) {
+                origTeacherTab.call(this, tabName);
+                if (tabName === 'doubts') touchMark('tdoubt');
+                this.refreshBell();
+            };
+
+            // something arrived from another phone while the app is open
+            const origRefresh = P.refreshFromCloud;
+            P.refreshFromCloud = function () {
+                try {
+                    if (this.currentUserRole) {
+                        const a = this.getAlerts();
+                        if (this._lastTotal !== undefined && a.total > this._lastTotal) {
+                            const it = a.items.find((i) => i.fresh) || a.items[0];
+                            if (it) this.showToast('New: ' + it.text + ' (tap the bell)');
+                        }
+                        this._lastTotal = a.total;
+                    }
+                } catch (e) { /* ignore */ }
+                origRefresh.call(this);
+                clearTimeout(this._bellTimer);
+                this._bellTimer = setTimeout(() => this.refreshBell(), 1200);
+            };
+
+            // a teacher's answer remembers WHEN it was written, so the student can be told about it
+            const origAnswer = P.answerDoubt;
+            P.answerDoubt = function (id) {
+                const box = document.getElementById('doubtReply-' + id);
+                const typed = box ? box.value.trim() : '';
+                origAnswer.call(this, id);
+                if (!typed) return;
+                const list = read('DOUBTS');
+                if (list.some((d) => d.id === id && d.reply)) {
+                    localStorage.setItem(DB_KEYS.DOUBTS, JSON.stringify(list.map((d) => d.id === id ? { ...d, replyTs: Date.now() } : d)));
+                }
+                this.refreshBell();
+            };
+
+            // keep the numbers right as soon as the teacher acts
+            ['deleteDoubt', 'selectTeacherChatStudent', 'updateVerificationBadge'].forEach((name) => {
+                const orig = P[name];
+                P[name] = function () {
+                    const r = orig.apply(this, arguments);
+                    this.refreshBell();
+                    return r;
+                };
+            });
+
+            // ---------- student dashboard: both ranks, bank, announcements with NEW tag ----------
+            const origDash = P.renderStudentDashboardTab;
+            P.renderStudentDashboardTab = function () {
+                origDash.call(this);
+                const s = this.currentStudent;
+                if (!s) return;
+                const all = read('STUDENTS');
+                const classCount = all.filter((x) => x.class === s.class).length;
+                const set = (id, v) => { const el = document.getElementById(id); if (el) el.innerText = v; };
+                set('spClassRank', '#' + this.getRank(s, 'class') + ' of ' + classCount);
+                set('spOverallRank', '#' + this.getRank(s, 'all') + ' of ' + all.length);
+
+                const bank = Number(s.bank) || 0;
+                set('spBankTotal', bank + ' pts');
+                const log = (s.bankLog || []).slice(-3).reverse();
+                const bl = document.getElementById('spBankList');
+                if (bl) bl.innerHTML = log.length ? log.map((e) => `<span class="block">${esc(e.label)} (${esc(e.date)}): +${e.pts}</span>`).join('') : 'Your saved points appear here.';
+
+                const nm = getMark('notice', s.id);
+                const notices = read('NOTICES').filter((n) => n.target === 'ALL' || n.target === s.class);
+                const box = document.getElementById('spNoticeList');
+                if (box) {
+                    box.innerHTML = notices.length === 0 ? '<p class="text-xs text-slate-400">No announcements yet.</p>' : notices.map((n) => `
+                        <div class="p-3 ${Number(n.id) > nm ? 'bg-amber-50 border-amber-300' : 'bg-slate-50 border-slate-200'} border rounded-xl text-xs space-y-1">
+                            <div class="flex justify-between items-center text-slate-500">
+                                <span class="font-bold text-emerald-700">Notice ${Number(n.id) > nm ? '<span class="ml-1 px-1.5 py-0.5 rounded-md bg-rose-500 text-white text-[10px]">NEW</span>' : ''}</span>
+                                <span>${esc(n.date)}</span>
+                            </div>
+                            <p class="text-slate-800 font-medium">${esc(n.text)}</p>
+                        </div>`).join('');
+                }
+                touchMark('notice', s.id);
+            };
+
+            // ---------- student leaderboard (ALL students) ----------
+            P.renderStudentLeaderboard = function () {
+                const s = this.currentStudent;
+                const body = document.getElementById('spLbBody');
+                if (!s || !body) return;
+                const scope = (document.getElementById('spLbScope') || {}).value || 'all';
+                const all = read('STUDENTS');
+                const pool = scope === 'class' ? all.filter((x) => x.class === s.class) : all;
+                const rows = pool.map((x) => ({ x, pts: Number(x.points) || 0 }))
+                    .sort((a, b) => b.pts - a.pts || String(a.x.name).localeCompare(String(b.x.name)));
+                const medal = (r) => r === 1 ? '🥇' : r === 2 ? '🥈' : r === 3 ? '🥉' : '';
+                const sum = document.getElementById('spLbSummary');
+                if (sum) sum.innerHTML = `<span class="font-bold text-amber-600">Overall #${this.getRank(s, 'all')}</span> of ${all.length} students &nbsp;·&nbsp; <span class="font-bold text-emerald-700">Class #${this.getRank(s, 'class')}</span> of ${all.filter((x) => x.class === s.class).length} &nbsp;·&nbsp; <span class="font-bold text-slate-700">${Number(s.points) || 0} EduPoints</span>`;
+                body.innerHTML = rows.length === 0 ? '<tr><td colspan="4" class="p-6 text-center text-xs text-slate-400">No students yet.</td></tr>' : rows.map((r) => {
+                    const rank = rows.filter((y) => y.pts > r.pts).length + 1;
+                    const me = r.x.id === s.id;
+                    return `<tr class="border-b border-slate-100 ${me ? 'bg-emerald-50 font-bold' : ''}">
+                        <td class="p-3 font-bold text-amber-600 whitespace-nowrap">${medal(rank)} #${rank}</td>
+                        <td class="p-3 text-slate-800">${esc(r.x.name)}${me ? ' <span class="ml-1 text-[10px] bg-emerald-600 text-white px-1.5 py-0.5 rounded-md">YOU</span>' : ''}</td>
+                        <td class="p-3">Class ${esc(r.x.class)}</td>
+                        <td class="p-3 font-bold text-amber-600"><i class="fa-solid fa-star text-xs"></i> ${r.pts}</td>
+                    </tr>`;
+                }).join('');
+            };
+
+            // ---------- student homework: NEW tag, Done / Partial status, marks it as SEEN ----------
+            P.renderStudentHomeworkTab = function () {
+                const s = this.currentStudent;
+                const container = document.getElementById('spHomeworkList');
+                if (!s || !container) return;
+                const my = read('HOMEWORK').filter((hw) => mineHw(hw, s));
+                if (my.length === 0) {
+                    container.innerHTML = '<p class="text-xs text-slate-400 py-4">No homework assigned for your class.</p>';
+                    return;
+                }
+                const fresh = new Set(my.filter((hw) => !(hw.seen && hw.seen[s.id])).map((hw) => hw.id));
+                container.innerHTML = my.map((hw) => {
+                    const done = !!(hw.completions && hw.completions[s.id]);
+                    const pct = hw.partial && hw.partial[s.id];
+                    const pts = (hw.credit && hw.credit[s.id] !== undefined) ? hw.credit[s.id] : (done ? 10 : 0);
+                    const pill = done ? `<span class="text-xs font-bold px-2.5 py-0.5 rounded-full bg-green-100 text-green-700">Completed +${pts} pts</span>`
+                        : (pct ? `<span class="text-xs font-bold px-2.5 py-0.5 rounded-full bg-amber-100 text-amber-700">Partly done ${pct}% +${pts} pts</span>`
+                            : `<span class="text-xs font-bold px-2.5 py-0.5 rounded-full bg-amber-100 text-amber-700">Pending</span>`);
+                    return `
+                        <div class="p-4 border rounded-2xl ${fresh.has(hw.id) ? 'bg-amber-50 border-amber-300' : 'bg-slate-50'} space-y-2">
+                            <div class="flex justify-between items-center gap-2">
+                                <span><span class="text-xs font-bold bg-emerald-100 text-emerald-800 px-2.5 py-1 rounded-md">${esc(hw.subject)}</span>${fresh.has(hw.id) ? ' <span class="ml-1 px-1.5 py-0.5 rounded-md bg-rose-500 text-white text-[10px] font-bold">NEW</span>' : ''}</span>
+                                ${pill}
+                            </div>
+                            <p class="text-sm font-medium text-slate-800">${esc(hw.details)}</p>
+                            <p class="text-xs text-slate-500"><strong>Due Date:</strong> ${esc(hw.dueDate)}</p>
+                        </div>`;
+                }).join('');
+                if (fresh.size) {
+                    const now = Date.now();
+                    localStorage.setItem(DB_KEYS.HOMEWORK, JSON.stringify(read('HOMEWORK').map((hw) => fresh.has(hw.id) ? { ...hw, seen: { ...(hw.seen || {}), [s.id]: now } } : hw)));
+                }
+            };
+
+            // doubts: tag answers that arrived since the last visit
+            const origDoubts = P.renderStudentDoubtsTab;
+            P.renderStudentDoubtsTab = function () {
+                origDoubts.call(this);
+                const s = this.currentStudent;
+                const box = document.getElementById('spDoubtsList');
+                if (!s || !box) return;
+                const dm = getMark('doubt', s.id);
+                const mine = read('DOUBTS').filter((d) => d.studentId === s.id);
+                Array.from(box.children).forEach((el, i) => {
+                    const d = mine[i];
+                    if (d && d.reply && Number(d.replyTs) > dm) {
+                        el.classList.add('border-amber-300');
+                        const head = el.querySelector('span');
+                        if (head) head.insertAdjacentHTML('afterend', ' <span class="ml-1 px-1.5 py-0.5 rounded-md bg-rose-500 text-white text-[10px] font-bold">NEW ANSWER</span>');
+                    }
+                });
+            };
+
+            // ---------- new screen parts (added automatically) ----------
+            (function injectUi() {
+                const head = document.getElementById('userInfoHeader');
+                if (head && !document.getElementById('notifBell')) {
+                    head.insertAdjacentHTML('afterbegin', `
+                <button id="notifBell" type="button" onclick="app.openNotifPanel()" title="Notifications" style="display:none" class="relative bg-white/10 hover:bg-white/20 text-white text-sm px-3 py-1.5 rounded-lg border border-white/20 transition">
+                    <i class="fa-solid fa-bell"></i>
+                    <span id="notifBadge" style="display:none" class="absolute -top-1.5 -right-1.5 min-w-[18px] h-[18px] px-1 rounded-full bg-rose-500 text-white text-[10px] font-bold items-center justify-center">0</span>
+                </button>`);
+                }
+                if (!document.getElementById('notifPanel')) {
+                    document.body.insertAdjacentHTML('beforeend', `
+                <div id="notifPanel" style="display:none" class="fixed inset-0 z-[60] bg-black/40 items-start sm:items-center justify-center p-4">
+                    <div class="bg-white rounded-2xl shadow-2xl w-full max-w-md overflow-hidden mt-16 sm:mt-0">
+                        <div class="bg-gradient-to-r from-emerald-700 to-teal-800 text-white p-4 flex justify-between items-center">
+                            <h3 id="notifTitle" class="font-bold"><i class="fa-solid fa-bell mr-2"></i>Notifications</h3>
+                            <button type="button" onclick="app.closeNotifPanel()" class="text-white/80 hover:text-white text-lg leading-none">&times;</button>
+                        </div>
+                        <div id="notifList" class="p-3 space-y-2 max-h-[60vh] overflow-y-auto"></div>
+                        <div class="p-3 border-t border-slate-100">
+                            <button type="button" onclick="app.closeNotifPanel()" class="w-full bg-emerald-600 hover:bg-emerald-700 text-white font-semibold text-sm py-2.5 rounded-xl">OK, got it</button>
+                        </div>
+                    </div>
+                </div>
+                <div id="notifToast" style="display:none;position:fixed;left:50%;bottom:64px;transform:translateX(-50%);z-index:70;max-width:90%;background:#065f46;color:#fff;padding:10px 18px;border-radius:999px;font:600 13px Arial,sans-serif;box-shadow:0 6px 20px rgba(0,0,0,.3);text-align:center"></div>`);
+                }
+
+                const dash = document.getElementById('spTab-dashboard');
+                const grid = dash ? dash.querySelector('.grid') : null;
+                if (grid && !document.getElementById('spOverallRank')) {
+                    grid.className = grid.className.replace('md:grid-cols-3', 'sm:grid-cols-2 lg:grid-cols-3');
+                    grid.insertAdjacentHTML('beforeend', `
+                    <div class="bg-white p-5 rounded-2xl border shadow-sm flex items-center space-x-4">
+                        <div class="p-3 bg-sky-100 text-sky-600 rounded-xl"><i class="fa-solid fa-ranking-star text-2xl"></i></div>
+                        <div>
+                            <p class="text-xs text-slate-500 font-semibold">Overall Rank (all students)</p>
+                            <h3 id="spOverallRank" class="text-2xl font-bold text-sky-600">#1</h3>
+                        </div>
+                    </div>
+                    <div class="bg-white p-5 rounded-2xl border shadow-sm flex items-center space-x-4 sm:col-span-2 lg:col-span-2">
+                        <div class="p-3 bg-indigo-100 text-indigo-600 rounded-xl"><i class="fa-solid fa-piggy-bank text-2xl"></i></div>
+                        <div>
+                            <p class="text-xs text-slate-500 font-semibold">Edu Bank (saved points)</p>
+                            <h3 id="spBankTotal" class="text-2xl font-bold text-indigo-600">0 pts</h3>
+                            <p id="spBankList" class="text-[11px] text-slate-500 mt-0.5"></p>
+                        </div>
+                    </div>`);
+                }
+                const nl = document.getElementById('spNoticeList');
+                if (dash && nl && !dash.dataset.noticeMoved) {
+                    const card = nl.closest('.bg-white');
+                    if (card) { dash.insertBefore(card, dash.firstChild); dash.dataset.noticeMoved = '1'; }
+                }
+
+                const chatBtn = document.getElementById('spTabNav-chat');
+                if (chatBtn && !document.getElementById('spTabNav-leaderboard')) {
+                    chatBtn.insertAdjacentHTML('afterend', `
+                <button onclick="app.switchStudentTab('leaderboard')" id="spTabNav-leaderboard" class="student-tab-btn px-4 py-2 rounded-xl font-semibold text-sm bg-white text-slate-600 border whitespace-nowrap">
+                    <i class="fa-solid fa-trophy mr-1"></i> Leaderboard
+                </button>`);
+                }
+                const chatTab = document.getElementById('spTab-chat');
+                if (chatTab && !document.getElementById('spTab-leaderboard')) {
+                    chatTab.insertAdjacentHTML('afterend', `
+            <div id="spTab-leaderboard" class="student-tab-content space-y-4 hidden">
+                <div class="bg-white p-6 rounded-2xl border shadow-sm space-y-4">
+                    <div class="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3">
+                        <h3 class="font-bold text-slate-800 text-lg flex items-center gap-2"><i class="fa-solid fa-trophy text-amber-500"></i> Leaderboard</h3>
+                        <select id="spLbScope" onchange="app.renderStudentLeaderboard()" class="px-3 py-2 text-sm rounded-xl border border-slate-300">
+                            <option value="all">All students</option>
+                            <option value="class">My class only</option>
+                        </select>
+                    </div>
+                    <p id="spLbSummary" class="text-xs text-slate-600"></p>
+                    <p class="text-[11px] text-slate-400">Ranked by current EduPoints. Same points means the same rank.</p>
+                    <div class="overflow-x-auto max-h-[28rem] overflow-y-auto custom-scrollbar">
+                        <table class="w-full text-left text-sm">
+                            <thead class="bg-slate-50 text-slate-600 font-semibold border-b border-slate-200 sticky top-0">
+                                <tr><th class="p-3">Rank</th><th class="p-3">Student</th><th class="p-3">Class</th><th class="p-3">EduPoints</th></tr>
+                            </thead>
+                            <tbody id="spLbBody"></tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>`);
+                }
+            })();
+        })();
+
+
+                // =====================================================================
+        // UPDATE PACK 8  -  teacher dashboard, month change, logo and a nicer look
+        // (paste this whole block ABOVE the line "// Initialize App ...", BELOW Update Pack 7)
+        // Needs Update Pack 2, 6 and 7 to be pasted first.
+        //  1. "Today at a glance" on the teacher Overview: today's attendance (who is absent),
+        //     what needs attention, fees due, top EduPoints and low attendance
+        //  2. Fee status is re-checked when the month changes (even if the app stays open) and
+        //     whenever you open Overview / Students
+        //  3. Settings > "Logo & Login page": upload your tuition logo. It shows in the top bar and as a soft
+        //     background behind the login box (needs the same small Cloud edit as Pack 6, already done there)
+        //  4. Nicer look: soft login background, smoother buttons and cards, tab animation, greeting for students
+        // =====================================================================
+        (function () {
+            const P = TuitionApp.prototype;
+            const SKEY = 'sharma_edu_settings';
+            const read = (k) => JSON.parse(localStorage.getItem(DB_KEYS[k]));
+
+            const localDateKey = () => {
+                const d = new Date();
+                return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+            };
+
+            // ---------- 1. TODAY AT A GLANCE ----------
+            P.renderTodayGlance = function () {
+                const box = document.getElementById('todayGlance');
+                if (!box) return;
+                const students = read('STUDENTS');
+                const att = read('ATTENDANCE');
+                const key = localDateKey();
+                const rec = att[key];
+                const ledger = this.getLedger();
+
+                // card 1: today's attendance
+                let card1;
+                if (rec) {
+                    const st = { Present: 0, Late: 0, Absent: 0 };
+                    const absent = [];
+                    students.forEach((s) => {
+                        const v = rec[s.id];
+                        if (v && st[v] !== undefined) st[v]++;
+                        if (v === 'Absent') absent.push(s.name);
+                    });
+                    card1 = `<div class="flex gap-2 text-xs font-bold flex-wrap">
+                            <span class="px-2.5 py-1 rounded-full bg-green-100 text-green-700">Present ${st.Present}</span>
+                            <span class="px-2.5 py-1 rounded-full bg-amber-100 text-amber-700">Late ${st.Late}</span>
+                            <span class="px-2.5 py-1 rounded-full bg-rose-100 text-rose-700">Absent ${st.Absent}</span>
+                        </div>
+                        ${absent.length ? `<p class="text-xs text-slate-500 font-semibold mt-2">Absent today:</p><div class="flex flex-wrap gap-1.5 mt-1">${absent.map((n) => `<span class="text-xs px-2 py-0.5 rounded-lg bg-rose-50 border border-rose-200 text-rose-700 font-medium">${esc(n)}</span>`).join('')}</div>` : '<p class="text-xs text-emerald-600 font-semibold mt-2"><i class="fa-solid fa-circle-check"></i> Nobody is absent today.</p>'}`;
+                } else {
+                    card1 = `<p class="text-sm text-slate-500">Attendance is <strong class="text-amber-600">not marked yet</strong> for today.</p>
+                        <button type="button" onclick="app.switchTeacherTab('attendance')" class="mt-2 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold px-3 py-1.5 rounded-lg">Mark attendance now</button>`;
+                }
+
+                // card 2: needs attention
+                const alerts = this.getAlerts().items.map((i) => `<button type="button" onclick="app.switchTeacherTab('${i.tab}')" class="w-full text-left flex items-center gap-2 p-2 rounded-xl bg-slate-50 hover:bg-emerald-50 border border-slate-200 text-xs font-semibold text-slate-700"><i class="fa-solid ${i.icon} text-emerald-600"></i><span class="flex-1">${esc(i.text)}</span><i class="fa-solid fa-chevron-right text-slate-400"></i></button>`);
+                const dueToday = read('HOMEWORK').filter((h) => h.dueDate === key).length;
+                if (dueToday) alerts.push(`<button type="button" onclick="app.switchTeacherTab('homework')" class="w-full text-left flex items-center gap-2 p-2 rounded-xl bg-slate-50 hover:bg-emerald-50 border border-slate-200 text-xs font-semibold text-slate-700"><i class="fa-solid fa-book-open text-emerald-600"></i><span class="flex-1">${dueToday} homework due today</span><i class="fa-solid fa-chevron-right text-slate-400"></i></button>`);
+                const card2 = alerts.length ? `<div class="space-y-1.5">${alerts.join('')}</div>` : '<p class="text-xs text-emerald-600 font-semibold"><i class="fa-solid fa-circle-check"></i> All clear. Nothing is waiting for you.</p>';
+
+                // card 3: fees due now
+                const dues = students.map((s) => ({ s, n: this.getDueMonths(s, ledger).length })).filter((x) => x.n > 0)
+                    .map((x) => ({ ...x, amt: x.n * (Number(x.s.feeAmount) || 0) })).sort((a, b) => b.amt - a.amt);
+                const card3 = dues.length === 0 ? '<p class="text-xs text-emerald-600 font-semibold"><i class="fa-solid fa-circle-check"></i> Everyone has paid.</p>'
+                    : `<div class="space-y-1">${dues.slice(0, 5).map((x) => `<div class="flex justify-between text-xs"><span class="font-semibold text-slate-700">${esc(x.s.name)}</span><span class="font-bold text-rose-600">₹${x.amt} <span class="font-normal text-slate-400">(${x.n} mo)</span></span></div>`).join('')}</div>
+                       <button type="button" onclick="app.switchTeacherTab('reminders')" class="mt-2 text-xs font-semibold text-emerald-700 hover:underline">${dues.length > 5 ? 'See all ' + dues.length + ' students' : 'Send reminders'} &rarr;</button>`;
+
+                // card 4: top points + low attendance
+                const top = students.map((s) => ({ s, p: Number(s.points) || 0 })).filter((x) => x.p > 0).sort((a, b) => b.p - a.p).slice(0, 3);
+                const low = students.filter((s) => Object.keys(att).some((d) => att[d] && att[d][s.id]) && Number(this.calculateStudentAttendancePercentage(s.id)) < 75)
+                    .map((s) => ({ s, pct: Number(this.calculateStudentAttendancePercentage(s.id)) })).sort((a, b) => a.pct - b.pct).slice(0, 5);
+                const medals = ['🥇', '🥈', '🥉'];
+                const card4 = `<p class="text-[11px] font-bold text-slate-500 uppercase mb-1">Top EduPoints this round</p>
+                    ${top.length ? top.map((x, i) => `<div class="flex justify-between text-xs"><span class="font-semibold text-slate-700">${medals[i]} ${esc(x.s.name)}</span><span class="font-bold text-amber-600">${x.p}</span></div>`).join('') : '<p class="text-xs text-slate-400">No points yet.</p>'}
+                    <p class="text-[11px] font-bold text-slate-500 uppercase mt-3 mb-1">Low attendance (below 75%)</p>
+                    ${low.length ? low.map((x) => `<div class="flex justify-between text-xs"><span class="font-semibold text-slate-700">${esc(x.s.name)}</span><span class="font-bold text-rose-600">${x.pct}%</span></div>`).join('') : '<p class="text-xs text-emerald-600 font-semibold">Nobody is below 75%.</p>'}`;
+
+                const wrap = (icon, color, title, body) => `<div class="bg-white p-5 rounded-2xl shadow-sm border border-slate-100">
+                        <h4 class="font-bold text-slate-800 text-sm flex items-center gap-2 mb-3"><span class="w-8 h-8 rounded-lg ${color} flex items-center justify-center"><i class="fa-solid ${icon}"></i></span>${title}</h4>${body}</div>`;
+                box.innerHTML = `
+                    <div class="flex items-center justify-between">
+                        <h3 class="font-bold text-slate-800 text-lg">Today at a glance <span class="text-xs font-medium text-slate-400 ml-1">${esc(new Date().toLocaleDateString(undefined, { weekday: 'long', day: 'numeric', month: 'long' }))}</span></h3>
+                    </div>
+                    <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4">
+                        ${wrap('fa-clipboard-user', 'bg-emerald-100 text-emerald-600', "Today's attendance", card1)}
+                        ${wrap('fa-bell', 'bg-amber-100 text-amber-600', 'Needs your attention', card2)}
+                        ${wrap('fa-indian-rupee-sign', 'bg-rose-100 text-rose-600', 'Fees due now', card3)}
+                        ${wrap('fa-star', 'bg-indigo-100 text-indigo-600', 'Highlights', card4)}
+                    </div>`;
+            };
+
+            const origOverview = P.renderOverviewTab;
+            P.renderOverviewTab = function () {
+                origOverview.call(this);
+                this.renderTodayGlance();
+            };
+
+            // ---------- 2. MONTH CHANGE ----------
+            P.checkMonthRollover = function () {
+                const k = this.currentMonthKey();
+                if (this._monthKey && this._monthKey !== k && this.currentUserRole === 'teacher') {
+                    this.syncFeeStatuses();
+                    const active = Array.from(document.querySelectorAll('.teacher-tab-content')).find((t) => !t.classList.contains('hidden'));
+                    if (active) { const name = active.id.replace('teacherTab-', ''); if (name !== 'attendance' && name !== 'settings') this.switchTeacherTab(name); }
+                }
+                this._monthKey = k;
+            };
+            document.addEventListener('visibilitychange', () => { try { if (document.visibilityState === 'visible' && app) app.checkMonthRollover(); } catch (e) { /* app not ready */ } });
+            setInterval(() => { try { if (app) app.checkMonthRollover(); } catch (e) { /* app not ready */ } }, 60000);
+
+            const origTab = P.switchTeacherTab;
+            P.switchTeacherTab = function (tabName) {
+                if (tabName === 'students' || tabName === 'overview') this.syncFeeStatuses();
+                this._monthKey = this.currentMonthKey();
+                origTab.call(this, tabName);
+            };
+
+            // ---------- 3. LOGO ----------
+            P.getLogo = function () {
+                try { return (JSON.parse(localStorage.getItem(SKEY) || '{}') || {}).logo || ''; } catch (e) { return ''; }
+            };
+
+            P.setLoginMode = function (on) {
+                document.body.classList.toggle('login-mode', !!on);
+                const main = document.querySelector('main');
+                if (main) main.classList.toggle('login-mode-main', !!on);
+            };
+
+            P.applyBranding = function () {
+                const logo = this.getLogo();
+                const main = document.querySelector('main');
+                if (main) { if (logo) main.style.setProperty('--brand-logo', 'url("' + logo + '")'); else main.style.removeProperty('--brand-logo'); }
+                const iconBox = document.querySelector('header .backdrop-blur-md');
+                if (iconBox) iconBox.innerHTML = logo
+                    ? `<img src="${logo}" alt="logo" style="width:32px;height:32px;object-fit:contain;border-radius:8px">`
+                    : '<i class="fa-solid fa-graduation-cap text-2xl text-emerald-300"></i>';
+                const wrap = document.getElementById('loginLogoWrap');
+                if (wrap) {
+                    let name = 'Sharma Eduacademy';
+                    try { name = (JSON.parse(localStorage.getItem(DB_KEYS.UPI_CONFIG)) || {}).payeeName || name; } catch (e) { /* ignore */ }
+                    wrap.innerHTML = logo ? `<img src="${logo}" alt="logo" style="width:84px;height:84px;object-fit:contain;margin:0 auto" class="drop-shadow"><p class="text-sm font-bold text-emerald-800 mt-2">Welcome to ${esc(name)}</p>`
+                        : `<p class="text-sm font-bold text-emerald-800">Welcome to ${esc(name)}</p>`;
+                }
+                const prev = document.getElementById('brandPreview');
+                if (prev) prev.innerHTML = logo ? `<img src="${logo}" alt="logo" style="max-width:100%;max-height:100%;object-fit:contain">` : 'No logo';
+            };
+
+            P.handleLogoUpload = function (e) {
+                const file = e.target.files[0];
+                e.target.value = '';
+                if (!file) return;
+                if (!file.type || !file.type.startsWith('image/')) { alert('Please choose an image file.'); return; }
+                const reader = new FileReader();
+                reader.onload = () => {
+                    const img = new Image();
+                    img.onload = () => {
+                        const draw = (max, type, q) => {
+                            const r = Math.min(1, max / Math.max(img.width, img.height));
+                            const c = document.createElement('canvas');
+                            c.width = Math.max(1, Math.round(img.width * r));
+                            c.height = Math.max(1, Math.round(img.height * r));
+                            c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
+                            return c.toDataURL(type, q);
+                        };
+                        let url = draw(320, file.type === 'image/png' ? 'image/png' : 'image/jpeg', 0.85);
+                        if (url.length > 250000) url = draw(240, 'image/jpeg', 0.8);
+                        if (url.length > 300000) { alert('This logo is too large. Please choose a simpler or smaller image.'); return; }
+                        this.storePointSettings({ logo: url });
+                        this.applyBranding();
+                        alert('Logo saved. It now shows in the top bar and on the login page.');
+                    };
+                    img.onerror = () => alert('Could not read this image.');
+                    img.src = reader.result;
+                };
+                reader.onerror = () => alert('Could not read this file.');
+                reader.readAsDataURL(file);
+            };
+
+            P.removeLogo = function () {
+                if (!this.getLogo()) return;
+                if (!confirm('Remove the logo?')) return;
+                this.storePointSettings({ logo: '' });
+                this.applyBranding();
+            };
+
+            const origSettings = P.renderSettingsTab;
+            P.renderSettingsTab = function () { origSettings.call(this); this.applyBranding(); };
+
+            // ---------- 4. LOOK ----------
+            const origHint = P.refreshTeacherPinHint;
+            P.refreshTeacherPinHint = function () {
+                origHint.call(this);
+                if (!this.currentUserRole) this.setLoginMode(true);
+                setTimeout(() => this.applyBranding(), 0);
+            };
+
+            const origTeacherLogin = P.completeTeacherLogin;
+            P.completeTeacherLogin = function () {
+                this.setLoginMode(false);
+                origTeacherLogin.call(this);
+            };
+
+            const origPortal = P.renderStudentPortal;
+            P.renderStudentPortal = function () {
+                this.setLoginMode(false);
+                origPortal.call(this);
+                const s = this.currentStudent;
+                const el = document.getElementById('spStudentName');
+                if (s && el) {
+                    const h = new Date().getHours();
+                    el.innerText = (h < 12 ? 'Good morning' : (h < 17 ? 'Good afternoon' : 'Good evening')) + ', ' + s.name + ' 👋';
+                }
+            };
+
+            const origLogout = P.logout;
+            P.logout = function () {
+                origLogout.call(this);
+                this.setLoginMode(true);
+            };
+
+            const origRefresh = P.refreshFromCloud;
+            P.refreshFromCloud = function () {
+                origRefresh.call(this);
+                this.applyBranding();
+            };
+
+            (function injectUi() {
+                if (!document.getElementById('lookStyles')) {
+                    document.head.insertAdjacentHTML('beforeend', `<style id="lookStyles">
+                        body.login-mode { background: linear-gradient(135deg, #ecfdf5 0%, #f0fdfa 45%, #eef2ff 100%) !important; }
+                        main.login-mode-main { position: relative; }
+                        main.login-mode-main::before { content: ''; position: absolute; inset: 0; background: var(--brand-logo, none) center / min(70vw, 460px) no-repeat; opacity: .12; pointer-events: none; }
+                        main.login-mode-main > #loginSection { position: relative; z-index: 1; }
+                        #loginSection > div:last-of-type { backdrop-filter: blur(6px); box-shadow: 0 20px 45px -15px rgba(5, 150, 105, .35); }
+                        section .rounded-2xl { transition: box-shadow .25s ease, transform .25s ease; }
+                        section .bg-white.rounded-2xl:hover { box-shadow: 0 12px 28px -12px rgba(5, 150, 105, .3); }
+                        button { transition: transform .12s ease, box-shadow .2s ease, background-color .2s ease; }
+                        button:active:not(:disabled) { transform: scale(.97); }
+                        .teacher-tab-btn:hover, .student-tab-btn:hover { transform: translateY(-1px); }
+                        .teacher-tab-content:not(.hidden), .student-tab-content:not(.hidden) { animation: tabFade .25s ease; }
+                        @keyframes tabFade { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+                        #studentPortal .from-emerald-700.to-teal-800.p-6 { position: relative; overflow: hidden; }
+                        #studentPortal .from-emerald-700.to-teal-800.p-6::after { content: ''; position: absolute; right: -40px; top: -40px; width: 160px; height: 160px; border-radius: 50%; background: rgba(255, 255, 255, .08); pointer-events: none; }
+                    </style>`);
+                }
+                const login = document.getElementById('loginSection');
+                if (login && !document.getElementById('loginLogoWrap')) {
+                    login.insertAdjacentHTML('afterbegin', '<div id="loginLogoWrap" class="text-center mb-4"></div>');
+                }
+                const overview = document.getElementById('teacherTab-overview');
+                if (overview && !document.getElementById('todayGlance')) {
+                    overview.insertAdjacentHTML('afterbegin', '<div id="todayGlance" class="space-y-3"></div>');
+                }
+                const grid = document.querySelector('#teacherTab-settings .grid');
+                if (grid && !document.getElementById('brandingCard')) {
+                    const html = `
+                    <div id="brandingCard" class="bg-white p-6 rounded-2xl shadow-sm border border-slate-100 space-y-4">
+                        <h3 class="font-bold text-slate-800 text-lg flex items-center gap-2"><i class="fa-solid fa-image text-emerald-600"></i> Logo & Login page</h3>
+                        <p class="text-xs text-slate-500">Your tuition logo shows in the top bar and as a soft background behind the login box.</p>
+                        <div class="flex items-center gap-4">
+                            <div id="brandPreview" class="w-20 h-20 shrink-0 rounded-xl border border-slate-200 bg-slate-50 flex items-center justify-center text-xs text-slate-400 overflow-hidden">No logo</div>
+                            <div class="space-y-2">
+                                <input type="file" accept="image/*" onchange="app.handleLogoUpload(event)" class="w-full text-xs text-slate-500 file:mr-3 file:py-2 file:px-3 file:rounded-xl file:border-0 file:text-xs file:font-semibold file:bg-emerald-50 file:text-emerald-700">
+                                <button type="button" onclick="app.removeLogo()" class="text-xs text-rose-600 hover:text-rose-800 font-semibold"><i class="fa-solid fa-trash"></i> Remove logo</button>
+                            </div>
+                        </div>
+                    </div>`;
+                    const pc = document.getElementById('pointSettingsCard');
+                    if (pc) pc.insertAdjacentHTML('afterend', html); else grid.insertAdjacentHTML('afterbegin', html);
+                }
+            })();
+        })();
+
+
+
+
         // Initialize App (only after the cloud data has been loaded, so every device starts with the same data)
         let app;
         Cloud.init().then(() => {
